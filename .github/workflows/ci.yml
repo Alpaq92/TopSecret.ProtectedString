@@ -92,10 +92,12 @@ jobs:
         # Konscious.Security.Cryptography.Argon2) emits AOT-incompatibility
         # warnings, this step turns them into a visible CI failure rather
         # than letting them sit quietly in the build log.
-        # No --no-restore: the AOT publish needs a linux-x64 + PublishAot
-        # restore (ILCompiler + runtime pack) the plain restore above didn't
-        # acquire, so let this step run its own implicit restore.
-        run: dotnet publish TopSecret.Demo/TopSecret.Demo.csproj --configuration Release --framework net10.0 --runtime linux-x64 -p:PublishAot=true -p:TreatWarningsAsErrors=true --self-contained
+        # AotDryRun (not -p:PublishAot=true) so PublishAot applies to the Demo
+        # Exe only — a global PublishAot property propagates to the whole build
+        # graph and the netstandard2.0 analyzer project fails it (NETSDK1207).
+        # No --no-restore: the AOT publish needs a linux-x64 + ILCompiler
+        # restore the plain restore above didn't acquire.
+        run: dotnet publish TopSecret.Demo/TopSecret.Demo.csproj --configuration Release --framework net10.0 --runtime linux-x64 -p:AotDryRun=true -p:TreatWarningsAsErrors=true --self-contained
 
       - name: Test (cross-platform)
         if: matrix.os != 'ubuntu-latest'

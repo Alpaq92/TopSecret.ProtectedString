@@ -13,15 +13,22 @@ namespace TopSecret.DemoWasm;
 /// </summary>
 public static partial class Program
 {
-    public static async Task Main()
-    {
-        Console.SetOut(new TerminalWriter());
-        await RunDemo();
-    }
+    private static bool s_outputWired;
+
+    // Required entry point for the Exe, but never invoked: main.js drives the
+    // demo through RunDemo() so the runtime stays alive for repeat runs
+    // (dotnet.run()/runMain() would exit it after Main returns).
+    public static void Main() { }
 
     [JSExport]
     internal static async Task RunDemo()
     {
+        if (!s_outputWired)
+        {
+            Console.SetOut(new TerminalWriter());
+            s_outputWired = true;
+        }
+
         Console.WriteLine("TopSecret demo - running fully client-side in your browser (.NET WebAssembly).");
         Console.WriteLine("Nothing you see here leaves this page; there is no server.");
         Console.WriteLine();

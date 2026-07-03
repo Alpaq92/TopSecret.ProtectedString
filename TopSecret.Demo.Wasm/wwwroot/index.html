@@ -58,6 +58,13 @@
         }
         header button:hover:not(:disabled) { background: var(--button-hover); }
         header button:disabled { opacity: 0.45; cursor: default; }
+        /* Align focus + form accents to the blue link colour (browser
+           defaults render a contrasting gold/yellow ring otherwise). */
+        header button:focus-visible, header select:focus-visible {
+            outline: 2px solid var(--link);
+            outline-offset: 1px;
+        }
+        header select { accent-color: var(--link); }
         #terminal { padding: 0.8rem 1.2rem; }
     </style>
     <script type="module" src="main.js"></script>

@@ -60,7 +60,13 @@ term = new Terminal({
 term.open(document.getElementById('terminal'));
 term.writeln('Loading .NET WebAssembly runtime…');
 
-const { setModuleImports, getAssemblyExports, getConfig, runMain } = await dotnet
+// create() instantiates and starts the runtime WITHOUT running Main. We
+// never call dotnet.run()/runMain() — both EXIT the runtime when Main
+// returns, which would leave "Run again" calling into a dead runtime
+// ("runtime already exited"). Instead the runtime stays alive and every
+// pass — the initial one and each button press — is the same [JSExport]
+// RunDemo() call.
+const { setModuleImports, getAssemblyExports, getConfig } = await dotnet
     .withDiagnosticTracing(false)
     .create();
 
@@ -72,7 +78,8 @@ setModuleImports('main.js', {
 
 const exports = await getAssemblyExports(getConfig().mainAssemblyName);
 const rerun = document.getElementById('rerun');
-rerun.addEventListener('click', async () => {
+
+async function runDemo() {
     rerun.disabled = true;
     term.clear();
     try {
@@ -80,14 +87,7 @@ rerun.addEventListener('click', async () => {
     } finally {
         rerun.disabled = false;
     }
-});
-
-// runMain (NOT dotnet.run) executes Main for the first demo pass: run()
-// EXITS the runtime when Main returns, which would leave "Run again"
-// calling into a dead runtime ("runtime already exited"). finally: the
-// retry button must come alive even (especially) when the first pass fails.
-try {
-    await runMain();
-} finally {
-    rerun.disabled = false;
 }
+
+rerun.addEventListener('click', runDemo);
+await runDemo(); // initial pass

@@ -1,16 +1,20 @@
 name: Deploy demo to GitHub Pages
 
 # Publishes TopSecret.Demo.Wasm — the xterm.js-wrapped, fully client-side
-# WebAssembly build of TopSecret.Demo — to GitHub Pages on every release
-# (release.yml publishes a GitHub Release at the end of each successful
-# NuGet push), so the live demo always matches the latest published
-# packages. workflow_dispatch allows out-of-band redeploys.
+# WebAssembly build of TopSecret.Demo — to GitHub Pages on every push to
+# master, so the live demo always matches the tip of the default branch
+# (every release lands on master via the release-please merge, so releases
+# are covered too). workflow_dispatch allows out-of-band redeploys.
+#
+# A push trigger also ensures GitHub registers this workflow immediately;
+# a dispatch/release/schedule-only workflow is not indexed until one of
+# those events first fires, which would make `workflow_dispatch` unusable.
 #
 # One-time repo setup: Settings → Pages → Source = "GitHub Actions".
 
 on:
-  release:
-    types: [published]
+  push:
+    branches: [master]
   workflow_dispatch:
 
 permissions:

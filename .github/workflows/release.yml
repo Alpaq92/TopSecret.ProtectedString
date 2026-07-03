@@ -154,10 +154,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release upload "${{ steps.tag.outputs.name }}" ./nupkg/* --clobber
 
-      # GITHUB_TOKEN-created releases don't fire pages.yml's release trigger;
-      # dispatch it explicitly so the live demo always matches the release.
-      - name: Deploy live demo to GitHub Pages
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh workflow run pages.yml --ref master
+      # The live demo redeploys via pages.yml on every push to master, and
+      # the release-please PR merge that produced this release was such a
+      # push — so the demo is already up to date without an explicit
+      # dispatch here.
