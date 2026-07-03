@@ -1,9 +1,14 @@
 # TopSecret.ProtectedString
 
 <div align="center">
-
-[![NuGet: TopSecret.ProtectedString](https://img.shields.io/nuget/v/TopSecret.ProtectedString.svg?label=TopSecret.ProtectedString)](https://www.nuget.org/packages/TopSecret.ProtectedString) [![NuGet: .WindowsTpm](https://img.shields.io/nuget/v/TopSecret.ProtectedString.WindowsTpm.svg?label=.WindowsTpm)](https://www.nuget.org/packages/TopSecret.ProtectedString.WindowsTpm) [![NuGet: .LinuxTpm](https://img.shields.io/nuget/v/TopSecret.ProtectedString.LinuxTpm.svg?label=.LinuxTpm)](https://www.nuget.org/packages/TopSecret.ProtectedString.LinuxTpm) [![NuGet: .Configuration](https://img.shields.io/nuget/v/TopSecret.ProtectedString.Configuration.svg?label=.Configuration)](https://www.nuget.org/packages/TopSecret.ProtectedString.Configuration) [![NuGet: TopSecret.ProtectedBlob (https://img.shields.io/nuget/v/TopSecret.ProtectedBlob.svg?label=TopSecret.ProtectedBlob)](https://www.nuget.org/packages/TopSecret.ProtectedBlob) [![CI](https://img.shields.io/github/actions/workflow/status/Alpaq92/TopSecret.ProtectedString/ci.yml?branch=master&label=CI)](https://github.com/Alpaq92/TopSecret.ProtectedString/actions/workflows/ci.yml) [![Live demo](https://img.shields.io/badge/demo-GitHub%20Pages-2ea44f)](https://alpaq92.github.io/TopSecret.ProtectedString/) [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-
+<a href="https://www.nuget.org/packages/TopSecret.ProtectedString"><img alt="NuGet: TopSecret.ProtectedString" src="https://img.shields.io/nuget/v/TopSecret.ProtectedString.svg?label=TopSecret.ProtectedString"></a>
+<a href="https://www.nuget.org/packages/TopSecret.ProtectedString.WindowsTpm"><img alt="NuGet: .WindowsTpm" src="https://img.shields.io/nuget/v/TopSecret.ProtectedString.WindowsTpm.svg?label=.WindowsTpm"></a>
+<a href="https://www.nuget.org/packages/TopSecret.ProtectedString.LinuxTpm"><img alt="NuGet: .LinuxTpm" src="https://img.shields.io/nuget/v/TopSecret.ProtectedString.LinuxTpm.svg?label=.LinuxTpm"></a>
+<a href="https://www.nuget.org/packages/TopSecret.ProtectedString.Configuration"><img alt="NuGet: .Configuration" src="https://img.shields.io/nuget/v/TopSecret.ProtectedString.Configuration.svg?label=.Configuration"></a>
+<a href="https://www.nuget.org/packages/TopSecret.ProtectedBlob"><img alt="NuGet: TopSecret.ProtectedBlob" src="https://img.shields.io/nuget/v/TopSecret.ProtectedBlob.svg?label=TopSecret.ProtectedBlob"></a>
+<a href="https://github.com/Alpaq92/TopSecret.ProtectedString/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/Alpaq92/TopSecret.ProtectedString/ci.yml?branch=master&label=CI"></a>
+<a href="https://alpaq92.github.io/TopSecret.ProtectedString/"><img alt="Live demo" src="https://img.shields.io/badge/demo-GitHub%20Pages-2ea44f"></a>
+<a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-blue.svg"></a>
 </div>
 
 **▶ [Try the live demo in your browser](https://alpaq92.github.io/TopSecret.ProtectedString/)** — the full scenario walkthrough plus a live NUnit run, all executing on the actual library, entirely client-side on .NET WebAssembly with no server involved.
