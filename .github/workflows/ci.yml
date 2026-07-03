@@ -6,10 +6,20 @@ on:
   push:
     branches: [master]
 
+# One CI run per ref at a time; a push flurry cancels superseded runs
+# instead of stacking them. (Once, 18 concurrently-hung runs exhausted the
+# account's ~20 concurrent-job quota and starved every other workflow.)
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     name: Build & Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # Backstop: a leg normally finishes in ~2 minutes; never let a hung
+    # step squat a runner slot for GitHub's default 6 hours.
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -136,8 +146,11 @@ jobs:
 
       - name: Start swtpm
         if: matrix.os == 'ubuntu-latest'
-        # Socket mode: command port 2321, control port 2322 (TcpTpmDevice's
-        # serverPort + 1 convention). --flags not-need-init,startup-clear
+        # Socket mode: command port 2321 (raw TPM2 bytes — the test connects
+        # here with TcpTpmDevice in linuxTrm/raw-stream mode; swtpm does NOT
+        # speak the Microsoft reference-simulator protocol), control port
+        # 2322 (swtpm's own control protocol, used below only by the
+        # swtpm_ioctl readiness probe). --flags not-need-init,startup-clear
         # tells the simulator to send TPM2_Startup itself, so the TPM is
         # ready for commands as soon as we connect. State is ephemeral
         # (--tpmstate dir=/tmp/swtpm); we don't need persistence between
@@ -171,6 +184,10 @@ jobs:
 
       - name: Test (Linux TPM)
         if: matrix.os == 'ubuntu-latest'
+        # TSS.NET socket reads have no timeout (SocketTimeout = -1), so a
+        # device-protocol mismatch hangs forever rather than failing — fail
+        # the step fast instead of wedging the job until the 6h job limit.
+        timeout-minutes: 5
         run: dotnet test TopSecret.ProtectedString.LinuxTpm.Tests/TopSecret.ProtectedString.LinuxTpm.Tests.csproj --configuration Release --no-build --verbosity normal
 
       - name: Stop swtpm

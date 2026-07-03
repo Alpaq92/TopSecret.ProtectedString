@@ -27,9 +27,11 @@ namespace TopSecret.LinuxTpm.Tests;
 public class LinuxTpmProtectorTests
 {
     // swtpm launched with `--server type=tcp,port=2321 --ctrl
-    // type=tcp,port=2322` — these are the conventional ports used by the
-    // TSS.MSR test suite. TcpTpmDevice's serverPort is the command port;
-    // it derives the platform port as serverPort + 1.
+    // type=tcp,port=2322` (see ci.yml). The command port carries RAW TPM2
+    // command bytes; the ctrl port speaks swtpm's own control protocol and
+    // is used only by the workflow's readiness probe. Neither implements
+    // the Microsoft reference-simulator (mssim) protocol, so TcpTpmDevice
+    // must run in linuxTrm (raw-stream) mode — see the ctor call below.
     private const string SwtpmHost = "127.0.0.1";
     private const int SwtpmCommandPort = 2321;
 
@@ -127,7 +129,16 @@ public class LinuxTpmProtectorTests
         // Hand a connected TcpTpmDevice to the protector via the internal
         // test seam. On success the protector takes ownership and disposes
         // the device on protector dispose.
-        var device = new TcpTpmDevice(SwtpmHost, SwtpmCommandPort);
+        //
+        // linuxTrm: true is load-bearing. TcpTpmDevice's default (mssim)
+        // mode opens serverPort+1 as a Microsoft-simulator "platform"
+        // channel and blocks forever awaiting a RemoteHandshake ack that
+        // swtpm never sends (TSS.NET socket reads have no timeout — this
+        // hung every ubuntu CI leg at this line until cancelled). Raw-stream
+        // mode uses the single command socket with raw TPM2 framing
+        // (auto-probed via GetRandom), which is what swtpm's TCP server
+        // actually speaks.
+        var device = new TcpTpmDevice(SwtpmHost, SwtpmCommandPort, stopTpm: false, linuxTrm: true);
         device.Connect();
 
         var protector = LinuxTpmProtector.TryCreateWithDevice(input, device);
