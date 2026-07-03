@@ -13,7 +13,7 @@
 
 **▶ [Try the live demo in your browser](https://alpaq92.github.io/TopSecret.ProtectedString/)** — the full scenario walkthrough plus a live NUnit run, all executing on the actual library, entirely client-side on .NET WebAssembly with no server involved.
 
-A cross-platform, .NET 10 alternative to `System.Security.SecureString` that actually encrypts its contents at rest in process memory on every supported platform — Windows, Linux, macOS, Android, iOS, Mac Catalyst, and browser WebAssembly.
+A cross-platform, .NET 10 alternative to `System.Security.SecureString` that actually encrypts its contents at rest in live process memory, using authenticated AES-GCM-256 encryption, on every single supported platform — Windows, Linux, macOS, Android, iOS, Mac Catalyst, and browser WebAssembly.
 
 > Microsoft now [recommends against using `SecureString` for new code](https://learn.microsoft.com/dotnet/api/system.security.securestring#remarks), partly because on non-Windows platforms it does not encrypt the buffer at all. This library is meant to fill that gap with the same usage shape developers already know. See [Replacing `SecureString`](#replacing-securestring) for the side-by-side and the migration mapping.
 
@@ -388,7 +388,7 @@ dotnet run --project TopSecret.Demo
 
 The same scenarios also run **fully client-side in the browser**: [`TopSecret.Demo.Wasm`](TopSecret.Demo.Wasm) wraps the shared `DemoApp` (in [`TopSecret.Demo.Core`](TopSecret.Demo.Core)) in an [xterm.js](https://github.com/xtermjs/xterm.js) terminal on .NET WebAssembly and is deployed to GitHub Pages by [`pages.yml`](.github/workflows/pages.yml) on every push to master. In the browser the demo uses the library's `net10.0-browser` build (BouncyCastle AES-GCM); the Argon2id scenario is skipped there — see the `browser-wasm` caveats.
 
-Both hosts finish by **running a representative NUnit slice live, in-process** ([`DemoTests`](TopSecret.Demo.Core/DemoTests.cs) via [`DemoTestRunner`](TopSecret.Demo.Core/DemoTestRunner.cs)) and reporting per-test PASS/SKIP/FAIL. Tests that aren't valid on the host self-skip (`Assert.Ignore`) — Argon2id on the single-threaded WASM runtime, the hardware-backed tier where no TPM/Secure Enclave/Keystore is present — so the demo shows exactly which behaviours verify where it runs. (The exhaustive suites — tamper matrices, wire-format pinning, rotation, TPM — run in CI, not the demo.)
+Both hosts finish by **running a representative NUnit slice live, in-process** ([`DemoTests`](TopSecret.Demo.Core/DemoTests.cs) via [`DemoTestRunner`](TopSecret.Demo.Core/DemoTestRunner.cs)) and reporting per-test PASS/SKIP/FAIL. Tests that aren't valid on the host self-skip (`Assert.Ignore`) — e.g. the hardware-backed tier where no TPM/Secure Enclave/Keystore is present — so the demo shows exactly which behaviours verify where it runs. (The exhaustive suites — tamper matrices, wire-format pinning, rotation, TPM — run in CI, not the demo.)
 
 The demo exercises every public-facing pattern:
 
@@ -865,7 +865,7 @@ The wire format agrees with the in-box `AesGcm` exactly, so the [Security model]
 
 Caveats specific to the browser path:
 
-- **Argon2id is unavailable on `net10.0-browser`.** The managed Argon2 implementation (Konscious) coordinates its lanes with blocking thread joins, which the single-threaded WASM runtime cannot perform — `ComputeArgon2idHash` / `VerifyArgon2idHash` throw `PlatformNotSupportedException` ("Cannot wait on monitors") in the browser. Verify credentials server-side, or track .NET's multithreaded-WASM work for a future lift.
+- **Argon2id runs with single-lane parallelism on `net10.0-browser`.** The managed Argon2 (Konscious) only needs worker threads when `DegreeOfParallelism > 1`; at the library's default `p = 1` it runs on a single thread, so `ComputeArgon2idHash` / `VerifyArgon2idHash` work in the browser (just slower — memory-hard hashing is interpreter-bound in WASM). Do **not** raise `parallelism` above 1 on the browser TFM: the extra lanes need threads the single-threaded WASM runtime lacks, which would throw. If you need multi-lane Argon2 in the browser, hash server-side or track .NET's multithreaded-WASM work.
 - **Memory locking is a no-op.** `mlock` / `VirtualLock` aren't reachable from inside the WebAssembly sandbox, so `MemoryLocker` silently degrades to "best effort" (its existing `try { ... } catch { return false; }` probe path). The threat model on browser is "don't let secrets escape the WASM module" rather than "don't let secrets be paged out" — there is no swap to leak to.
 - **`<IsAotCompatible>` is suspended on `net10.0-browser` only.** BouncyCastle is not yet trim/AOT clean. The wasm runtime AOT-compiles to native WebAssembly via the `wasm-tools` workload independently of the IL-level trimmer, so this does not affect the user-visible AOT story on browser.
 - **Hardware-backed wrap is unavailable.** No SEP, no Keystore, no TPM on the browser. `KeyAtRestProtection.HardwareBackedRequired` throws on construction; `HardwareBackedPreferred` falls through to the obscurity tier (HKDF stream-XOR), then to the no-op tier — same as any other platform without a hardware-backed provider registered.

@@ -107,12 +107,12 @@ const rerun = document.getElementById('rerun');
 async function runDemo(isRerun) {
     rerun.disabled = true;
     if (isRerun) {
-        // Clear and immediately show a status line (like the initial run's
-        // "Loading…") so the terminal is never blank while the runtime
+        // Clear and immediately show a status line (mirroring the initial
+        // run's "Loading…") so the terminal is never blank while the runtime
         // re-runs and the first output lines start streaming in.
         term.clear();
         lineQueue.length = 0;
-        term.writeln('Running demo…');
+        term.writeln('Re-running the demo on the .NET WebAssembly runtime…');
     }
     try {
         await exports.TopSecret.DemoWasm.Program.RunDemo();

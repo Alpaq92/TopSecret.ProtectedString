@@ -87,14 +87,22 @@ public class DemoTests
     [Test]
     public void Argon2id_verifies_the_right_credential()
     {
-        if (OperatingSystem.IsBrowser())
+        // Argon2 with the library's default parallelism of 1 runs even on the
+        // single-threaded WASM runtime (only p>1 needs worker threads). If a
+        // host still can't run it, skip rather than fail.
+        var salt = RandomNumberGenerator.GetBytes(16);
+        byte[] stored;
+        try
         {
-            Assert.Ignore("Argon2 coordinates lanes with blocking thread joins, unsupported on the single-threaded WASM runtime.");
+            using var secret = new ProtectedString("hunter2".AsSpan());
+            stored = secret.ComputeArgon2idHash(salt);
+        }
+        catch (Exception ex) when (ex is PlatformNotSupportedException or System.Threading.ThreadStateException)
+        {
+            Assert.Ignore($"Argon2 unavailable on this host: {ex.GetType().Name}.");
+            return;
         }
 
-        var salt = RandomNumberGenerator.GetBytes(16);
-        using var secret = new ProtectedString("hunter2".AsSpan());
-        byte[] stored = secret.ComputeArgon2idHash(salt);
         using var right = new ProtectedString("hunter2".AsSpan());
         using var wrong = new ProtectedString("Hunter2".AsSpan());
         Assert.Multiple(() =>

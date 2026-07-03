@@ -105,18 +105,12 @@ public static class DemoApp
         Console.WriteLine($"  a.Equals(c) (different value) = {a.Equals(c2)}");
 
         // 8. Credential verification — Argon2id with OWASP-aligned defaults.
-        //    Skipped in the browser: the managed Argon2 implementation
-        //    (Konscious) coordinates its lanes with blocking thread joins,
-        //    which the single-threaded WASM runtime cannot perform
-        //    (PlatformNotSupportedException: "Cannot wait on monitors").
+        //    Runs in the browser too: the library's default parallelism is 1
+        //    (a single lane), so the managed Argon2 does not need the worker
+        //    threads the single-threaded WASM runtime lacks — only p>1 would.
+        //    Guarded so any host that still can't run it degrades gracefully.
         Console.WriteLine();
-        if (OperatingSystem.IsBrowser())
-        {
-            Console.WriteLine("  Argon2id credential verification: skipped in the browser — the managed");
-            Console.WriteLine("  Argon2 implementation blocks on worker threads, which the single-threaded");
-            Console.WriteLine("  WASM runtime does not support. Run the console demo for this scenario.");
-        }
-        else
+        try
         {
             var salt = RandomNumberGenerator.GetBytes(16);
             var sw = Stopwatch.StartNew();
@@ -128,6 +122,10 @@ public static class DemoApp
             using var wrongAttempt = new ProtectedString("Hunter2");
             Console.WriteLine($"    rightAttempt.VerifyArgon2idHash(stored) = {rightAttempt.VerifyArgon2idHash(stored, salt)}");
             Console.WriteLine($"    wrongAttempt.VerifyArgon2idHash(stored) = {wrongAttempt.VerifyArgon2idHash(stored, salt)}");
+        }
+        catch (Exception ex) when (ex is PlatformNotSupportedException or System.Threading.ThreadStateException)
+        {
+            Console.WriteLine($"  Argon2id credential verification: unavailable on this host ({ex.GetType().Name}).");
         }
 
         // 9. ToString never leaks the protected value, so accidental logging is safe.
