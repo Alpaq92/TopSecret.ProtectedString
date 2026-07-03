@@ -25,7 +25,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # global.json pins the SDK floor at 10.0.200 (with
       # `rollForward: latestFeature`, so any 10.0.2xx-or-newer SDK

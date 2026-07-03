@@ -31,7 +31,7 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # Honours global.json (SDK floor 10.0.200, rollForward latestFeature).
       - name: Setup .NET
