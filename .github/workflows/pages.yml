@@ -1,0 +1,72 @@
+name: Deploy demo to GitHub Pages
+
+# Publishes TopSecret.Demo.Wasm — the xterm.js-wrapped, fully client-side
+# WebAssembly build of TopSecret.Demo — to GitHub Pages on every release
+# (release.yml publishes a GitHub Release at the end of each successful
+# NuGet push), so the live demo always matches the latest published
+# packages. workflow_dispatch allows out-of-band redeploys.
+#
+# One-time repo setup: Settings → Pages → Source = "GitHub Actions".
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: github-pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    name: Publish wasm demo
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Honours global.json (SDK floor 10.0.200, rollForward latestFeature).
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+
+      - name: Install wasm-tools workload
+        run: dotnet workload install wasm-tools
+
+      - name: Publish TopSecret.Demo.Wasm
+        run: dotnet publish TopSecret.Demo.Wasm/TopSecret.Demo.Wasm.csproj --configuration Release -o ./demo-publish
+
+      # The WebAssembly SDK's publish output is the AppBundle folder
+      # (index.html + main.js + _framework/). Locate it robustly rather
+      # than hard-coding the intermediate layout, then disable Jekyll so
+      # the underscore-prefixed _framework folder is served.
+      - name: Stage Pages artifact
+        run: |
+          set -euo pipefail
+          matches=$(find ./demo-publish -name index.html -printf '%h\n')
+          count=$(printf '%s\n' "$matches" | grep -c . || true)
+          if [ "$count" -ne 1 ]; then
+            echo "Expected exactly one index.html in publish output, found $count" >&2
+            find ./demo-publish -maxdepth 3 -type d >&2
+            exit 1
+          fi
+          bundle=$matches
+          echo "AppBundle: $bundle"
+          touch "$bundle/.nojekyll"
+          echo "bundle=$bundle" >> "$GITHUB_ENV"
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ${{ env.bundle }}
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

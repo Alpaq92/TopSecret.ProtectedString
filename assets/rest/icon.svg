@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <title>TopSecret satellite packages</title>
+  <defs>
+    <!-- Jellyfin vue-icon gradient: green -> slate, top-left to bottom-right. -->
+    <linearGradient id="jellyfinVue" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#41B883"/>
+      <stop offset="100%" stop-color="#34495E"/>
+    </linearGradient>
+    <!-- White depth gradient for the T: bright top-left -> dimmer bottom-right, matching the shield's light direction. -->
+    <linearGradient id="tDepth" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FFFFFF"/>
+      <stop offset="100%" stop-color="#C3D4CC"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Material Design Icons "shield" path (24x24), uniformly scaled to 256. -->
+  <path fill="url(#jellyfinVue)"
+        transform="scale(10.6667)"
+        d="M12,1L3,5V11C3,16.55 6.84,21.74 12,23C17.16,21.74 21,16.55 21,11V5L12,1Z"/>
+
+  <!-- Material Design Icons "alpha-t" path (24x24), centered, scaled 11x, with white depth gradient. -->
+  <path fill="url(#tDepth)"
+        transform="translate(-4 -4) scale(11)"
+        d="M9,7V9H11V17H13V9H15V7H9Z"/>
+</svg>

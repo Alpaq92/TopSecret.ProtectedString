@@ -1,0 +1,88 @@
+name: Build platform-specific TFMs
+
+# Manually-triggered build verification for the TFMs whose runtime
+# platforms have no GitHub-hosted runner: iOS, Android, and browser
+# WebAssembly. Building these on every push would only compile-check
+# (we can't actually run the binaries here without a device farm or a
+# browser-driver harness), so this workflow lives behind
+# workflow_dispatch instead.
+#
+# Release.yml builds every TFM on every release run, so the package's
+# platform-specific binaries are still verified before publishing —
+# this workflow is for ad-hoc compile checks between releases (e.g.
+# after a refactor that touches the AesGcmShim or any TFM-conditional
+# code path).
+#
+# All three jobs honour `global.json`'s SDK 10.0.200 floor via the
+# default setup-dotnet@v4 behaviour (no explicit version arg). The
+# floor exists because the analyzer references Microsoft.CodeAnalysis.CSharp
+# 5.3.0; see `Maintainer notes — version pins worth knowing` in
+# README.md for the full rationale.
+on:
+  workflow_dispatch:
+
+jobs:
+  ios:
+    name: Build net10.0-ios
+    # iOS cross-compilation requires Xcode and the Apple SDKs — only
+    # macOS runners have them.
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+
+      - name: Install ios workload
+        run: dotnet workload install ios
+
+      - name: Build main library — net10.0-ios
+        run: dotnet build TopSecret.ProtectedString/TopSecret.ProtectedString.csproj --configuration Release --framework net10.0-ios
+
+  android:
+    name: Build net10.0-android
+    # Android cross-compiles fine from Linux; ubuntu-latest is faster
+    # and cheaper than macos-14 for this leg.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+
+      - name: Install android workload
+        run: dotnet workload install android
+
+      - name: Build main library — net10.0-android
+        run: dotnet build TopSecret.ProtectedString/TopSecret.ProtectedString.csproj --configuration Release --framework net10.0-android
+
+  browser:
+    name: Build net10.0-browser
+    # WebAssembly cross-compiles via the wasm-tools workload on any
+    # host; ubuntu-latest is fastest. The compile path also drags in
+    # BouncyCastle.Cryptography (the AesGcm fallback for the browser
+    # TFM), so this job doubles as a check that BouncyCastle's
+    # transitive dep graph still resolves cleanly under the wasm SDK.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+
+      - name: Install wasm-tools workload
+        run: dotnet workload install wasm-tools
+
+      - name: Build main library — net10.0-browser
+        run: dotnet build TopSecret.ProtectedString/TopSecret.ProtectedString.csproj --configuration Release --framework net10.0-browser
+
+      # The wasm demo host is deliberately outside the sln (ci.yml legs have
+      # no wasm-tools workload), so this manual job is its only compile
+      # check before pages.yml builds it post-release. Run this workflow
+      # after changes to DemoApp, the JSImport/JSExport surface, or any
+      # BROWSER-conditional core path.
+      - name: Build TopSecret.Demo.Wasm (net10.0-browser)
+        run: dotnet build TopSecret.Demo.Wasm/TopSecret.Demo.Wasm.csproj --configuration Release

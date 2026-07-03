@@ -1,0 +1,30 @@
+name: Dependabot auto-merge
+
+on: pull_request
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  auto-merge:
+    if: github.actor == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch Dependabot metadata
+        id: meta
+        uses: dependabot/fetch-metadata@v2
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Dependency-update PRs (NuGet packages and GitHub Actions pins) are
+      # exempt from the one-week review-soak that human PRs get
+      # (auto-merge-approved.yml): --auto merges them the moment the
+      # required checks pass and the required approval exists. Branch
+      # protection still gates — this never bypasses a red build.
+      - name: Enable auto-merge for dependency PRs
+        if: steps.meta.outputs.package-ecosystem == 'nuget' || steps.meta.outputs.package-ecosystem == 'github_actions'
+        run: gh pr merge --auto --squash "$PR_URL"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

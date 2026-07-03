@@ -1,0 +1,262 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+
+jobs:
+  build:
+    name: Build & Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # macos-14 (pinned, not macos-latest) verifies the net10.0-ios and
+        # net10.0-maccatalyst TFM builds with the actual Apple toolchain
+        # (Xcode + Apple SDKs), not whatever cross-compile shim happens to
+        # work on Windows / Linux. The pin matters because the cross-platform
+        # tests assert Apple SEP availability on macOS, which holds on
+        # Apple-Silicon runners (macos-14 is arm64) but would break if
+        # `macos-latest` ever rolled to an image without SEP. No TPM tests
+        # run on this leg.
+        os: [ubuntu-latest, windows-latest, macos-14]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # global.json pins the SDK floor at 10.0.200 (with
+      # `rollForward: latestFeature`, so any 10.0.2xx-or-newer SDK
+      # satisfies it). The 10.0.200 floor is required because the
+      # analyzer references Microsoft.CodeAnalysis.CSharp 5.3.0, which
+      # needs host compiler 5.3+ — that ships in SDK 10.0.200+ only.
+      # setup-dotnet@v4 honours global.json when no version is given,
+      # installing the requested floor on the runner if it isn't
+      # already present.
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+
+      # GitHub-hosted runners exist for Windows, Linux, and macOS but NOT
+      # for iOS, Android, or browser WebAssembly — those would require a
+      # device farm (AWS Device Farm, Firebase Test Lab) or a
+      # browser-driver harness, which we don't use here. Consequence: the
+      # iOS / Android / browser TFM builds add no test signal beyond
+      # compile-checking, so they live in the manually-triggered
+      # `Build platform-specific TFMs` workflow
+      # (`build-platform-tfms.yml`) instead of this push/PR pipeline.
+      # release.yml also builds every TFM on every release run, so the
+      # package's platform-specific binaries are still verified before
+      # publishing.
+      #
+      # This workflow builds:
+      #   net10.0              — cross-platform, all legs (no workload)
+      #   net10.0-macos        — macos-14 only (macos workload)
+      #   net10.0-maccatalyst  — macos-14 only (maccatalyst workload)
+      - name: Install macOS-native workloads (macOS only)
+        if: matrix.os == 'macos-14'
+        run: dotnet workload install macos maccatalyst
+
+      - name: Restore
+        run: dotnet restore
+
+      # Build only the TFMs whose runtime platform has a GitHub-hosted
+      # runner. A sln-wide `dotnet build` here would attempt every TFM the
+      # main library declares, which would fail on ubuntu / windows
+      # (no iOS/Android/browser workload installed in this leg) and on
+      # macos-14 (no iOS/Android/browser workload installed either —
+      # they're release-time and on-demand only). Targeting `--framework`
+      # for the multi-TFM library project, then a sln-wide build for
+      # everything else (tests, demo, analyzer, TPM packages — all
+      # net10.0 or netstandard2.0) gives full coverage on each leg
+      # without attempting cross-compilation we can't verify by run.
+      - name: Build main library — net10.0 (all OSes)
+        run: dotnet build TopSecret.ProtectedString/TopSecret.ProtectedString.csproj --configuration Release --no-restore --framework net10.0
+
+      - name: Build main library — macOS-native TFMs (macOS only)
+        if: matrix.os == 'macos-14'
+        run: |
+          dotnet build TopSecret.ProtectedString/TopSecret.ProtectedString.csproj --configuration Release --no-restore --framework net10.0-macos
+          dotnet build TopSecret.ProtectedString/TopSecret.ProtectedString.csproj --configuration Release --no-restore --framework net10.0-maccatalyst
+
+      # Build the rest of the solution project-by-project. A sln-wide build
+      # cannot be used here: without --framework it would attempt the main
+      # library's mobile/browser TFMs (no workloads on these legs), and with
+      # --framework net10.0 the global TargetFramework override breaks the
+      # netstandard2.0 analyzer project (NETSDK1005: assets file has no
+      # target for net10.0 — observed on SDK 10.0.300). Building the leaf
+      # projects instead lets normal ProjectReference TFM negotiation build
+      # every dependency correctly (core → net10.0 inner build, analyzers →
+      # netstandard2.0). The analyzer is wired into the main library via
+      # OutputItemType="Analyzer", so these builds also exercise its
+      # diagnostics against the library's own source as a defence-in-depth
+      # dogfood. bash on every leg so any failing line fails the step.
+      - name: Build remaining projects (net10.0)
+        shell: bash
+        run: |
+          dotnet build TopSecret.ProtectedString.Tests/TopSecret.ProtectedString.Tests.csproj --configuration Release --no-restore
+          dotnet build TopSecret.ProtectedString.Analyzers.Tests/TopSecret.ProtectedString.Analyzers.Tests.csproj --configuration Release --no-restore
+          dotnet build TopSecret.ProtectedString.Configuration.Tests/TopSecret.ProtectedString.Configuration.Tests.csproj --configuration Release --no-restore
+          dotnet build TopSecret.ProtectedString.WindowsTpm.Tests/TopSecret.ProtectedString.WindowsTpm.Tests.csproj --configuration Release --no-restore
+          dotnet build TopSecret.ProtectedString.LinuxTpm.Tests/TopSecret.ProtectedString.LinuxTpm.Tests.csproj --configuration Release --no-restore
+          dotnet build TopSecret.ProtectedBlob.Tests/TopSecret.ProtectedBlob.Tests.csproj --configuration Release --no-restore
+          dotnet build TopSecret.Demo/TopSecret.Demo.csproj --configuration Release --no-restore
+
+      # AOT publish dry-run. Native-AOT-compiles the Demo executable, which
+      # consumes the main library — so the AOT analyzers (already enabled at
+      # build time via IsAotCompatible) and the IL→native compiler both run
+      # against the full dependency graph the library exposes. Catches
+      # AOT-incompatibilities the build-time analyzers miss (e.g. link-time
+      # symbol resolution, transitive trim warnings). ubuntu-latest only —
+      # GitHub's Linux image ships build-essential + clang preinstalled, so
+      # no extra prerequisite step is needed; the same on windows-latest
+      # would require the Visual Studio C++ workload, which we'd rather not
+      # depend on.
+      - name: AOT publish dry-run (linux-x64)
+        if: matrix.os == 'ubuntu-latest'
+        # TreatWarningsAsErrors=true makes any IL2026 / IL2050 / IL3050 /
+        # transitive trim warning fail the step. If a third-party dep (e.g.
+        # Konscious.Security.Cryptography.Argon2) emits AOT-incompatibility
+        # warnings, this step turns them into a visible CI failure rather
+        # than letting them sit quietly in the build log.
+        run: dotnet publish TopSecret.Demo/TopSecret.Demo.csproj --configuration Release --framework net10.0 --runtime linux-x64 -p:PublishAot=true -p:TreatWarningsAsErrors=true --self-contained --no-restore
+
+      - name: Test (cross-platform)
+        if: matrix.os != 'ubuntu-latest'
+        run: dotnet test TopSecret.ProtectedString.Tests/TopSecret.ProtectedString.Tests.csproj --configuration Release --no-build --verbosity normal
+
+      # ProtectedBlob suite: wire-format pinning (golden layouts — a failure
+      # is a breaking format change), round-trip boundary sizes, the tamper
+      # fail-closed matrix, lifecycle, concurrency, and rotation
+      # non-interference. Same leg split as the core tests: ubuntu runs the
+      # suite inside its coverage-gate step at the end of the job.
+      - name: Test (ProtectedBlob)
+        if: matrix.os != 'ubuntu-latest'
+        run: dotnet test TopSecret.ProtectedBlob.Tests/TopSecret.ProtectedBlob.Tests.csproj --configuration Release --no-build --verbosity normal
+
+      # Analyzer detection-rule tests. Hosts EscapingPlaintextAnalyzer
+      # against in-memory C# snippets and asserts on the diagnostics it
+      # emits — both expected violations (TPS001 / TPS002 must fire) and
+      # expected-clean code (no diagnostic). Without this leg, analyzer
+      # regressions are invisible in CI: a broken analyzer "just works"
+      # until a user writes the missed pattern. Runs on every OS leg.
+      - name: Test (analyzer detection rules)
+        run: dotnet test TopSecret.ProtectedString.Analyzers.Tests/TopSecret.ProtectedString.Analyzers.Tests.csproj --configuration Release --no-build --verbosity normal
+
+      # Configuration-binding tests. Exercises
+      # ProtectedStringConfigurationExtensions against an in-memory
+      # IConfiguration: each option binds correctly, missing keys leave
+      # defaults, malformed values silently no-op (don't throw at
+      # startup), enum parsing is case-insensitive, both the
+      # IConfiguration and IConfigurationSection overloads work.
+      - name: Test (Configuration binding)
+        run: dotnet test TopSecret.ProtectedString.Configuration.Tests/TopSecret.ProtectedString.Configuration.Tests.csproj --configuration Release --no-build --verbosity normal
+
+      # The Windows TPM smoke tests exercise the optional NCrypt-based
+      # protector against a real TPM. windows-latest runners typically
+      # expose a vTPM via the Microsoft Platform Crypto Provider; tests
+      # self-skip with Assert.Ignore when the provider is unavailable.
+      - name: Test (Windows TPM)
+        if: matrix.os == 'windows-latest'
+        run: dotnet test TopSecret.ProtectedString.WindowsTpm.Tests/TopSecret.ProtectedString.WindowsTpm.Tests.csproj --configuration Release --no-build --verbosity normal
+
+      # The Linux TPM smoke tests run against:
+      #   1. /dev/tpmrm0 if a real TPM is exposed (CI runners aren't, so
+      #      that test self-skips here),
+      #   2. a software TPM 2.0 simulator (swtpm) over TCP — installed and
+      #      started below before the test step. swtpm is a faithful
+      #      implementation of the TPM 2.0 wire protocol; it validates the
+      #      TSS.MSR call shape (CreatePrimary, Create, Load, RsaEncrypt,
+      #      RsaDecrypt, FlushContext) end-to-end without needing
+      #      hardware-specific runner provisioning.
+      - name: Install swtpm (TPM 2.0 simulator)
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y swtpm swtpm-tools
+
+      - name: Start swtpm
+        if: matrix.os == 'ubuntu-latest'
+        # Socket mode: command port 2321, control port 2322 (TcpTpmDevice's
+        # serverPort + 1 convention). --flags not-need-init,startup-clear
+        # tells the simulator to send TPM2_Startup itself, so the TPM is
+        # ready for commands as soon as we connect. State is ephemeral
+        # (--tpmstate dir=/tmp/swtpm); we don't need persistence between
+        # test runs since every test creates a fresh ephemeral key.
+        # --pid file=... lets the cleanup step kill exactly our daemon
+        # rather than every swtpm process on the runner.
+        run: |
+          mkdir -p /tmp/swtpm
+          swtpm socket \
+            --tpmstate dir=/tmp/swtpm \
+            --ctrl type=tcp,port=2322 \
+            --server type=tcp,port=2321 \
+            --tpm2 \
+            --flags not-need-init,startup-clear \
+            --pid file=/tmp/swtpm.pid \
+            --daemon
+          # Wait for swtpm to be reachable on the control channel —
+          # i.e. the daemon is in its main accept loop, not just that
+          # the kernel accepted a TCP connect. swtpm_ioctl -g asks the
+          # control channel for the TPM established flag and waits for
+          # a reply.
+          for i in $(seq 1 10); do
+            if swtpm_ioctl --tcp 127.0.0.1:2322 -g >/dev/null 2>&1; then
+              echo "swtpm ready (responsive to swtpm_ioctl)"
+              exit 0
+            fi
+            sleep 0.5
+          done
+          echo "swtpm did not become responsive in time" >&2
+          exit 1
+
+      - name: Test (Linux TPM)
+        if: matrix.os == 'ubuntu-latest'
+        run: dotnet test TopSecret.ProtectedString.LinuxTpm.Tests/TopSecret.ProtectedString.LinuxTpm.Tests.csproj --configuration Release --no-build --verbosity normal
+
+      - name: Stop swtpm
+        # always() so the daemon is reaped even if the test step failed;
+        # comes first because GitHub Actions skips the step when an earlier
+        # step has failed unless an always()/failure()/cancelled() is the
+        # leftmost expression.
+        if: always() && matrix.os == 'ubuntu-latest'
+        # Prefer the PID file (precise — only kills the daemon we
+        # started). Fall back to the broad pkill pattern in case swtpm
+        # never wrote the PID file (e.g. it crashed before fully
+        # daemonising). Either way, cleanup is best-effort: a leftover
+        # daemon doesn't affect the rest of the job.
+        run: |
+          if [ -f /tmp/swtpm.pid ]; then
+            kill "$(cat /tmp/swtpm.pid)" 2>/dev/null || true
+            rm -f /tmp/swtpm.pid
+          else
+            pkill -f 'swtpm socket' || true
+          fi
+
+      # Coverage gate runs LAST on the Linux leg so its build-time
+      # re-instrumentation of TopSecret.ProtectedString.dll doesn't
+      # affect any tests downstream (analyzer detection, Linux TPM smoke).
+      # coverlet.msbuild's /p:CollectCoverage + /p:Threshold flags fail
+      # the step if total line coverage drops below the floor — 65% as
+      # of this writing, with actual coverage ≈68%. Tune the floor up
+      # as new tests land; never tune it down without a documented
+      # reason. Coverage runs only on the Linux leg (single-leg numbers
+      # are authoritative for this pure-managed library) and re-builds
+      # the project (no `--no-build`) because coverlet.msbuild
+      # instruments during build, not at run time. The
+      # `Include="[TopSecret.ProtectedString]*"` filter scopes the gate
+      # to the main library — coverlet already excludes
+      # IsTestProject=true assemblies by default, but the explicit
+      # Include also excludes any future packable sibling (TPM
+      # subpackages, future analyzer-side projects) from skewing the
+      # number, intentionally or not.
+      - name: Coverage gate (Linux only, runs last)
+        if: matrix.os == 'ubuntu-latest'
+        run: dotnet test TopSecret.ProtectedString.Tests/TopSecret.ProtectedString.Tests.csproj --configuration Release --verbosity normal '-p:CollectCoverage=true' '-p:Include="[TopSecret.ProtectedString]*"' -p:Threshold=65 -p:ThresholdType=line -p:ThresholdStat=total
+
+      # ProtectedBlob gets its own gate with its own Include filter so the
+      # main library's number stays pure (the comment above promises
+      # siblings won't skew it) and a coverage drop in either package is
+      # attributable at a glance. Same 65% line floor from day one.
+      - name: Coverage gate — ProtectedBlob (Linux only, runs last)
+        if: matrix.os == 'ubuntu-latest'
+        run: dotnet test TopSecret.ProtectedBlob.Tests/TopSecret.ProtectedBlob.Tests.csproj --configuration Release --verbosity normal '-p:CollectCoverage=true' '-p:Include="[TopSecret.ProtectedBlob]*"' -p:Threshold=65 -p:ThresholdType=line -p:ThresholdStat=total

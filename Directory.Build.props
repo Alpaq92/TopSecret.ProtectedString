@@ -1,0 +1,26 @@
+<Project>
+
+  <!--
+    Release-time PackageReleaseNotes injection.
+
+    The release workflow (.github/workflows/release.yml) writes the
+    auto-generated changelog body to release_notes.txt at the repo root.
+    When that file exists, every IsPackable=true project picks the body
+    up here and stamps it into the .nuspec's <releaseNotes> element, so
+    the changelog appears on the package's nuget.org landing page.
+
+    Why this lives in MSBuild rather than `dotnet pack -p:PackageReleaseNotes=`:
+    multi-line property values don't survive command-line tokenisation
+    cleanly (newlines become a `%0A` URL-encoding hack, which nuget.org
+    renders literally instead of as line breaks). Reading the file from
+    inside the build keeps newlines as newlines all the way to the .nuspec.
+
+    Local builds without release_notes.txt are unaffected — the property
+    falls back to whatever each csproj has set (currently, none of them
+    set it, so the .nuspec just omits <releaseNotes>).
+  -->
+  <PropertyGroup Condition="Exists('$(MSBuildThisFileDirectory)release_notes.txt')">
+    <PackageReleaseNotes>$([System.IO.File]::ReadAllText('$(MSBuildThisFileDirectory)release_notes.txt'))</PackageReleaseNotes>
+  </PropertyGroup>
+
+</Project>

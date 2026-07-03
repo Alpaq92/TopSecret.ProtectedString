@@ -1,0 +1,53 @@
+version: 2
+updates:
+  - package-ecosystem: "nuget"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    open-pull-requests-limit: 5
+    # feat(deps): the feat type makes release-please cut a MINOR release for
+    # the monthly dependency refresh (auto-merged PR -> release PR -> publish),
+    # and the deps scope renders as the bold **deps:** prefix in the changelog.
+    commit-message:
+      prefix: "feat"
+      include: "scope"
+    labels:
+      - "dependencies"
+    groups:
+      nuget-minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
+    ignore:
+      # `Microsoft.CodeAnalysis.CSharp` is locked to a major.minor pin
+      # because bumping it implies bumping the SDK floor in `global.json`,
+      # which is a consumer-breaking change for anyone building against
+      # this package on an older SDK. Current pin: 5.3.0, requires
+      # `Microsoft.CodeAnalysis` compiler 5.3+ which ships in .NET SDK
+      # 10.0.200+. Patch bumps inside 5.3.x still propose PRs; minor
+      # and major bumps must be a deliberate maintainer choice with a
+      # matching `global.json` floor change. See "Maintainer notes —
+      # version pins worth knowing" in README.md.
+      - dependency-name: "Microsoft.CodeAnalysis.CSharp"
+        update-types:
+          - "version-update:semver-minor"
+          - "version-update:semver-major"
+      # Same constraint, but Analyzers tends to track CSharp's compiler
+      # requirements — only block major bumps so minor improvements
+      # still flow through automatically.
+      - dependency-name: "Microsoft.CodeAnalysis.Analyzers"
+        update-types:
+          - "version-update:semver-major"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    open-pull-requests-limit: 5
+    # Action-pin bumps are invisible to package consumers — fix-level.
+    commit-message:
+      prefix: "fix"
+      include: "scope"
+    labels:
+      - "dependencies"
+      - "github-actions"

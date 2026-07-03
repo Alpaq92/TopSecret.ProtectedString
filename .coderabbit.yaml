@@ -1,0 +1,43 @@
+# CodeRabbit configuration — https://docs.coderabbit.ai/reference/configuration
+# The CodeRabbit GitHub App must be installed on this repository
+# (https://github.com/apps/coderabbitai) for reviews to run; this file only
+# configures its behavior once installed. Its PR approvals count toward the
+# ruleset's required-approval gate, satisfying "maintainer OR CodeRabbit".
+
+language: "en-US"
+
+reviews:
+  profile: "assertive"
+  request_changes_workflow: true   # blocking: unresolved findings hold the PR
+  high_level_summary: true
+  poem: false
+  review_status: true
+  auto_review:
+    enabled: true                  # review every PR automatically
+    drafts: false
+  path_instructions:
+    - path: "TopSecret.ProtectedString/**/*.cs"
+      instructions: |
+        Security-critical code. Verify: every pinned/locked buffer is wiped via
+        CryptographicOperations.ZeroMemory (through ProtectedString.ZeroBytes/ZeroChars)
+        on ALL exit paths including exceptions; no plaintext escapes an Access
+        callback; internal members consumed by sibling assemblies keep
+        TFM-invariant signatures (#if in bodies only).
+    - path: "TopSecret.ProtectedBlob/**/*.cs"
+      instructions: |
+        Security-critical code. The wire format (ChunkFormat.cs) is FROZEN —
+        any byte-layout change is breaking and requires a new magic value and
+        an update to WireFormatPinningTests, never a silent edit. Verify DEK
+        scratch is wiped in finally on all paths and that reads fail closed
+        (CryptographicException) on any tamper scenario.
+    - path: "**/*Tests/**/*.cs"
+      instructions: |
+        Tamper-matrix and wire-format-pinning tests are contracts, not
+        implementation mirrors — flag any weakening (removed cases, loosened
+        assertions, Assert.Ignore added without a platform reason).
+  path_filters:
+    - "!**/bin/**"
+    - "!**/obj/**"
+
+chat:
+  auto_reply: true

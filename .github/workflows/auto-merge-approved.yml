@@ -1,0 +1,64 @@
+name: Auto-merge approved PRs after soak
+
+# Human PRs merge automatically one week after their latest approval,
+# provided the approval still stands and the required checks are green —
+# a soak window for second thoughts and late review comments. Dependency
+# PRs (dependabot) are exempt and merge immediately via
+# dependabot-auto-merge.yml. Opt out of auto-merge entirely by labeling
+# a PR `no-auto-merge`.
+#
+# GitHub has no native "merge N days after approval", so this runs on a
+# daily schedule and merges what has soaked. Branch protection still
+# applies — the merge API refuses if checks or approvals regressed.
+
+on:
+  schedule:
+    - cron: '17 6 * * *' # daily, 06:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  merge-soaked:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Merge PRs approved ≥ 7 days ago
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          cutoff=$(date -u -d '7 days ago' +%Y-%m-%dT%H:%M:%SZ)
+          echo "Soak cutoff: approvals before $cutoff qualify"
+
+          gh pr list --repo "$REPO" --state open --json number,labels,isDraft \
+            --jq '.[] | select(.isDraft | not) | select((.labels | map(.name) | index("no-auto-merge")) | not) | .number' |
+          while read -r pr; do
+            # Latest APPROVED review that is still the current review state
+            # for that reviewer (gh surfaces dismissed/superseded reviews too,
+            # so take the newest APPROVED and require no later CHANGES_REQUESTED).
+            latest_approval=$(gh pr view "$pr" --repo "$REPO" --json reviews \
+              --jq '[.reviews[] | select(.state == "APPROVED")] | max_by(.submittedAt) | .submittedAt // empty')
+            changes_requested=$(gh pr view "$pr" --repo "$REPO" --json reviews \
+              --jq '[.reviews[] | select(.state == "CHANGES_REQUESTED")] | max_by(.submittedAt) | .submittedAt // empty')
+
+            if [ -z "$latest_approval" ]; then
+              echo "PR #$pr: no approval yet — skip"
+              continue
+            fi
+            if [ -n "$changes_requested" ] && [[ "$changes_requested" > "$latest_approval" ]]; then
+              echo "PR #$pr: changes requested after approval — skip"
+              continue
+            fi
+            if [[ "$latest_approval" > "$cutoff" ]]; then
+              echo "PR #$pr: approved $latest_approval — still soaking"
+              continue
+            fi
+
+            echo "PR #$pr: approved $latest_approval (soaked) — merging"
+            # Branch protection has the final word: this fails loudly if
+            # required checks aren't green or the approval no longer counts.
+            gh pr merge "$pr" --repo "$REPO" --squash || echo "PR #$pr: merge refused by branch protection — leaving for next run"
+          done

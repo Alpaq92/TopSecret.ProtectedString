@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>TopSecret.ProtectedString — live demo</title>
+    <!-- Version-pinned xterm.js from jsDelivr; the rest of the page is the
+         static output of `dotnet publish` and runs entirely client-side. -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/css/xterm.min.css" />
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/lib/xterm.min.js"></script>
+    <style>
+        :root {
+            --bg: #f5f5f7;
+            --fg: #1b1b1f;
+            --muted: #6b6b74;
+            --border: #d9d9e0;
+            --button-bg: #ffffff;
+            --button-hover: #ececf1;
+            --link: #2563ab;
+        }
+        :root[data-theme="dark"] {
+            --bg: #101014;
+            --fg: #d4d4d8;
+            --muted: #8a8a93;
+            --border: #26262c;
+            --button-bg: #1e1e26;
+            --button-hover: #26262f;
+            --link: #7cb2e8;
+        }
+        html, body {
+            margin: 0;
+            padding: 0;
+            background: var(--bg);
+            color: var(--fg);
+            font-family: system-ui, sans-serif;
+        }
+        header {
+            padding: 0.8rem 1.2rem;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: baseline;
+            gap: 0.8rem;
+            flex-wrap: wrap;
+        }
+        header h1 { font-size: 1.05rem; margin: 0; font-weight: 600; }
+        header a { color: var(--link); text-decoration: none; }
+        header a:hover { text-decoration: underline; }
+        header .note { font-size: 0.8rem; color: var(--muted); }
+        header button, header select {
+            background: var(--button-bg);
+            color: var(--fg);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            padding: 0.2rem 0.8rem;
+            font-size: 0.85rem;
+            cursor: pointer;
+        }
+        header button:hover:not(:disabled) { background: var(--button-hover); }
+        header button:disabled { opacity: 0.45; cursor: default; }
+        #terminal { padding: 0.8rem 1.2rem; }
+    </style>
+    <script type="module" src="main.js"></script>
+</head>
+
+<body>
+    <header>
+        <h1>TopSecret.ProtectedString + ProtectedBlob — live demo</h1>
+        <a href="https://github.com/Alpaq92/TopSecret.ProtectedString">GitHub</a>
+        <a href="https://www.nuget.org/packages/TopSecret.ProtectedString">NuGet</a>
+        <button id="rerun" disabled>Run again</button>
+        <select id="theme" aria-label="Theme">
+            <option value="system" selected>System</option>
+            <option value="light">Light</option>
+            <option value="dark">Dark</option>
+        </select>
+        <span class="note">Runs entirely in your browser via .NET WebAssembly — no server, nothing leaves the page.</span>
+    </header>
+    <div id="terminal"></div>
+</body>
+
+</html>
