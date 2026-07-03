@@ -35,7 +35,7 @@ jobs:
 
       # Honours global.json (SDK floor 10.0.200, rollForward latestFeature).
       - name: Setup .NET
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v5
 
       - name: Install wasm-tools workload
         run: dotnet workload install wasm-tools
