@@ -13,7 +13,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # macos-14 (pinned, not macos-latest) verifies the net10.0-ios and
+        # macos-14 (pinned, not macos-latest) verifies the net10.0-macos and
         # net10.0-maccatalyst TFM builds with the actual Apple toolchain
         # (Xcode + Apple SDKs), not whatever cross-compile shim happens to
         # work on Windows / Linux. The pin matters because the cross-platform
@@ -21,7 +21,23 @@ jobs:
         # Apple-Silicon runners (macos-14 is arm64) but would break if
         # `macos-latest` ever rolled to an image without SEP. No TPM tests
         # run on this leg.
-        os: [ubuntu-latest, windows-latest, macos-14]
+        #
+        # tfms restricts the main library's TargetFrameworks (via the CI_TFMS
+        # env var → MSBuild property) to what each leg has workloads for:
+        # net10.0 everywhere, plus the two Apple desktop TFMs on macOS. The
+        # iOS/Android/browser TFMs are compile-checked in build-platform-tfms.yml
+        # and packed in release.yml — building them here would need workloads
+        # no hosted runner has all of.
+        include:
+          - os: ubuntu-latest
+            tfms: net10.0
+          - os: windows-latest
+            tfms: net10.0
+          - os: macos-14
+            tfms: net10.0;net10.0-macos;net10.0-maccatalyst
+
+    env:
+      CI_TFMS: ${{ matrix.tfms }}
 
     steps:
       - name: Checkout
@@ -39,21 +55,11 @@ jobs:
         uses: actions/setup-dotnet@v4
 
       # GitHub-hosted runners exist for Windows, Linux, and macOS but NOT
-      # for iOS, Android, or browser WebAssembly — those would require a
-      # device farm (AWS Device Farm, Firebase Test Lab) or a
-      # browser-driver harness, which we don't use here. Consequence: the
-      # iOS / Android / browser TFM builds add no test signal beyond
-      # compile-checking, so they live in the manually-triggered
-      # `Build platform-specific TFMs` workflow
-      # (`build-platform-tfms.yml`) instead of this push/PR pipeline.
-      # release.yml also builds every TFM on every release run, so the
-      # package's platform-specific binaries are still verified before
-      # publishing.
-      #
-      # This workflow builds:
-      #   net10.0              — cross-platform, all legs (no workload)
-      #   net10.0-macos        — macos-14 only (macos workload)
-      #   net10.0-maccatalyst  — macos-14 only (maccatalyst workload)
+      # for iOS, Android, or browser WebAssembly. Those TFMs are
+      # compile-checked in the manually-triggered `build-platform-tfms.yml`
+      # and packed in `release.yml`; here CI_TFMS (set per-OS above) keeps
+      # the main library's TargetFrameworks down to what this leg has
+      # workloads for, so a plain restore + sln-wide build just works.
       - name: Install macOS-native workloads (macOS only)
         if: matrix.os == 'macos-14'
         run: dotnet workload install macos maccatalyst
@@ -61,47 +67,13 @@ jobs:
       - name: Restore
         run: dotnet restore
 
-      # Build only the TFMs whose runtime platform has a GitHub-hosted
-      # runner. A sln-wide `dotnet build` here would attempt every TFM the
-      # main library declares, which would fail on ubuntu / windows
-      # (no iOS/Android/browser workload installed in this leg) and on
-      # macos-14 (no iOS/Android/browser workload installed either —
-      # they're release-time and on-demand only). Targeting `--framework`
-      # for the multi-TFM library project, then a sln-wide build for
-      # everything else (tests, demo, analyzer, TPM packages — all
-      # net10.0 or netstandard2.0) gives full coverage on each leg
-      # without attempting cross-compilation we can't verify by run.
-      - name: Build main library — net10.0 (all OSes)
-        run: dotnet build TopSecret.ProtectedString/TopSecret.ProtectedString.csproj --configuration Release --no-restore --framework net10.0
-
-      - name: Build main library — macOS-native TFMs (macOS only)
-        if: matrix.os == 'macos-14'
-        run: |
-          dotnet build TopSecret.ProtectedString/TopSecret.ProtectedString.csproj --configuration Release --no-restore --framework net10.0-macos
-          dotnet build TopSecret.ProtectedString/TopSecret.ProtectedString.csproj --configuration Release --no-restore --framework net10.0-maccatalyst
-
-      # Build the rest of the solution project-by-project. A sln-wide build
-      # cannot be used here: without --framework it would attempt the main
-      # library's mobile/browser TFMs (no workloads on these legs), and with
-      # --framework net10.0 the global TargetFramework override breaks the
-      # netstandard2.0 analyzer project (NETSDK1005: assets file has no
-      # target for net10.0 — observed on SDK 10.0.300). Building the leaf
-      # projects instead lets normal ProjectReference TFM negotiation build
-      # every dependency correctly (core → net10.0 inner build, analyzers →
-      # netstandard2.0). The analyzer is wired into the main library via
-      # OutputItemType="Analyzer", so these builds also exercise its
-      # diagnostics against the library's own source as a defence-in-depth
-      # dogfood. bash on every leg so any failing line fails the step.
-      - name: Build remaining projects (net10.0)
-        shell: bash
-        run: |
-          dotnet build TopSecret.ProtectedString.Tests/TopSecret.ProtectedString.Tests.csproj --configuration Release --no-restore
-          dotnet build TopSecret.ProtectedString.Analyzers.Tests/TopSecret.ProtectedString.Analyzers.Tests.csproj --configuration Release --no-restore
-          dotnet build TopSecret.ProtectedString.Configuration.Tests/TopSecret.ProtectedString.Configuration.Tests.csproj --configuration Release --no-restore
-          dotnet build TopSecret.ProtectedString.WindowsTpm.Tests/TopSecret.ProtectedString.WindowsTpm.Tests.csproj --configuration Release --no-restore
-          dotnet build TopSecret.ProtectedString.LinuxTpm.Tests/TopSecret.ProtectedString.LinuxTpm.Tests.csproj --configuration Release --no-restore
-          dotnet build TopSecret.ProtectedBlob.Tests/TopSecret.ProtectedBlob.Tests.csproj --configuration Release --no-restore
-          dotnet build TopSecret.Demo/TopSecret.Demo.csproj --configuration Release --no-restore
+      # Sln-wide build. With CI_TFMS scoping the main library, every project
+      # (tests, demo, analyzer, TPM packages) builds on every leg, and the
+      # analyzer — wired into the main library via OutputItemType="Analyzer"
+      # — self-applies to the library's own source as a defence-in-depth
+      # dogfood.
+      - name: Build
+        run: dotnet build TopSecret.ProtectedString.sln --configuration Release --no-restore
 
       # AOT publish dry-run. Native-AOT-compiles the Demo executable, which
       # consumes the main library — so the AOT analyzers (already enabled at
@@ -120,7 +92,10 @@ jobs:
         # Konscious.Security.Cryptography.Argon2) emits AOT-incompatibility
         # warnings, this step turns them into a visible CI failure rather
         # than letting them sit quietly in the build log.
-        run: dotnet publish TopSecret.Demo/TopSecret.Demo.csproj --configuration Release --framework net10.0 --runtime linux-x64 -p:PublishAot=true -p:TreatWarningsAsErrors=true --self-contained --no-restore
+        # No --no-restore: the AOT publish needs a linux-x64 + PublishAot
+        # restore (ILCompiler + runtime pack) the plain restore above didn't
+        # acquire, so let this step run its own implicit restore.
+        run: dotnet publish TopSecret.Demo/TopSecret.Demo.csproj --configuration Release --framework net10.0 --runtime linux-x64 -p:PublishAot=true -p:TreatWarningsAsErrors=true --self-contained
 
       - name: Test (cross-platform)
         if: matrix.os != 'ubuntu-latest'

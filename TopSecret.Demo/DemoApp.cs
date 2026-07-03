@@ -179,7 +179,7 @@ public static class DemoApp
         Console.WriteLine();
         Console.WriteLine("  ProtectedBlob (bulk secrets):");
 
-        var payload = RandomNumberGenerator.GetBytes(200_000); // e.g. a sealed asset / model shard
+        var payload = RandomNumberGenerator.GetBytes(2_000_000); // e.g. a sealed asset / model shard
         var payloadHashHex = Convert.ToHexString(SHA256.HashData(payload));
         using (var blob = new ProtectedBlob(payload, clearSource: true))
         {

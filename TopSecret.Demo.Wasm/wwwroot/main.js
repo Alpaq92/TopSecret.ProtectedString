@@ -60,7 +60,7 @@ term = new Terminal({
 term.open(document.getElementById('terminal'));
 term.writeln('Loading .NET WebAssembly runtime…');
 
-const { setModuleImports, getAssemblyExports, getConfig } = await dotnet
+const { setModuleImports, getAssemblyExports, getConfig, runMain } = await dotnet
     .withDiagnosticTracing(false)
     .create();
 
@@ -82,11 +82,12 @@ rerun.addEventListener('click', async () => {
     }
 });
 
-// dotnet.run() executes Main (the first demo pass) and resolves when it
-// returns; the runtime stays alive for the button's re-runs. finally: the
+// runMain (NOT dotnet.run) executes Main for the first demo pass: run()
+// EXITS the runtime when Main returns, which would leave "Run again"
+// calling into a dead runtime ("runtime already exited"). finally: the
 // retry button must come alive even (especially) when the first pass fails.
 try {
-    await dotnet.run();
+    await runMain();
 } finally {
     rerun.disabled = false;
 }
