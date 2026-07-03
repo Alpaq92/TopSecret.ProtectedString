@@ -104,13 +104,16 @@ setInterval(() => {
 const exports = await getAssemblyExports(getConfig().mainAssemblyName);
 const rerun = document.getElementById('rerun');
 
-async function runDemo(initialDelayMs) {
+async function runDemo(isRerun) {
     rerun.disabled = true;
-    // Flush the terminal immediately so the clear is visible, then pause
-    // briefly before the new output starts streaming in.
-    term.clear();
-    lineQueue.length = 0;
-    if (initialDelayMs) await new Promise((r) => setTimeout(r, initialDelayMs));
+    if (isRerun) {
+        // Clear and immediately show a status line (like the initial run's
+        // "Loading…") so the terminal is never blank while the runtime
+        // re-runs and the first output lines start streaming in.
+        term.clear();
+        lineQueue.length = 0;
+        term.writeln('Running demo…');
+    }
     try {
         await exports.TopSecret.DemoWasm.Program.RunDemo();
     } finally {
@@ -118,5 +121,5 @@ async function runDemo(initialDelayMs) {
     }
 }
 
-rerun.addEventListener('click', () => runDemo(1000)); // clear, ~1s pause, then stream
-await runDemo(0); // initial pass streams right away
+rerun.addEventListener('click', () => runDemo(true)); // clear + immediate status, then stream
+await runDemo(false); // initial pass keeps the "Loading…" line, then streams
