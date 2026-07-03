@@ -52,7 +52,7 @@ jobs:
       # installing the requested floor on the runner if it isn't
       # already present.
       - name: Setup .NET
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v5
 
       # GitHub-hosted runners exist for Windows, Linux, and macOS but NOT
       # for iOS, Android, or browser WebAssembly. Those TFMs are
