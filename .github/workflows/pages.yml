@@ -63,7 +63,7 @@ jobs:
           echo "bundle=$bundle" >> "$GITHUB_ENV"
 
       - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v5
         with:
           path: ${{ env.bundle }}
 
