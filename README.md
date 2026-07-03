@@ -1097,4 +1097,4 @@ The Jellyfin colours are used only as a palette reference; this project is not a
 
 ## License
 
-[MIT](LICENSE).
+[MIT](LICENSE). Third-party material this project incorporates, builds on, or cites is catalogued in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).

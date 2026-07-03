@@ -57,7 +57,14 @@ term = new Terminal({
     fontSize: 14,
     theme: TERM_THEMES[resolvedTheme(themeMode)],
 });
+// Fit addon sizes the terminal grid to fill its container (which flexes to
+// the viewport height) and re-fits on window resize.
+const fitAddon = new FitAddon.FitAddon();
+term.loadAddon(fitAddon);
 term.open(document.getElementById('terminal'));
+const refit = () => { try { fitAddon.fit(); } catch { /* pre-open */ } };
+refit();
+window.addEventListener('resize', refit);
 term.writeln('Loading .NET WebAssembly runtime…');
 
 // create() instantiates and starts the runtime WITHOUT running Main. We
