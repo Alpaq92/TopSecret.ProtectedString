@@ -15,6 +15,13 @@ updates:
       - "dependencies"
     groups:
       nuget-minor-and-patch:
+        # Keep the Roslyn packages OUT of the group: a grouped bump can carry
+        # a package past an individual `ignore` rule, which is how
+        # Microsoft.CodeAnalysis.CSharp once slipped from 5.3.0 to 5.6.0 and
+        # broke the SDK-floor pin (CS1705 / CS9057). Excluded here AND ignored
+        # below — belt and suspenders.
+        exclude-patterns:
+          - "Microsoft.CodeAnalysis*"
         update-types:
           - "minor"
           - "patch"
@@ -32,11 +39,13 @@ updates:
         update-types:
           - "version-update:semver-minor"
           - "version-update:semver-major"
-      # Same constraint, but Analyzers tends to track CSharp's compiler
-      # requirements — only block major bumps so minor improvements
-      # still flow through automatically.
+      # Analyzers tracks CSharp's compiler/Roslyn version, so a minor bump
+      # can drag Microsoft.CodeAnalysis past the pinned host compiler
+      # (CS1705). Block minor and major; patch bumps inside the line still
+      # propose PRs.
       - dependency-name: "Microsoft.CodeAnalysis.Analyzers"
         update-types:
+          - "version-update:semver-minor"
           - "version-update:semver-major"
 
   - package-ecosystem: "github-actions"

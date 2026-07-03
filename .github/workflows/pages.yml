@@ -44,7 +44,12 @@ jobs:
       - name: Install wasm-tools workload
         run: dotnet workload install wasm-tools
 
+      # CI_TFMS restricts the main library to the TFMs this runner can build
+      # (net10.0 + the browser build the wasm demo binds); otherwise restore
+      # pulls net10.0-android/-ios/etc. and fails with NETSDK1147.
       - name: Publish TopSecret.Demo.Wasm
+        env:
+          CI_TFMS: net10.0;net10.0-browser
         run: dotnet publish TopSecret.Demo.Wasm/TopSecret.Demo.Wasm.csproj --configuration Release -o ./demo-publish
 
       # The WebAssembly SDK's publish output is the AppBundle folder

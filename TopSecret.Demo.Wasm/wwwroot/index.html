@@ -59,12 +59,23 @@
         header button:hover:not(:disabled) { background: var(--button-hover); }
         header button:disabled { opacity: 0.45; cursor: default; }
         /* Align focus + form accents to the blue link colour (browser
-           defaults render a contrasting gold/yellow ring otherwise). */
+           defaults render a contrasting gold/yellow ring otherwise). Use
+           :focus (not just :focus-visible) so the blue ring shows however
+           the control was focused — click or keyboard. */
+        header button:focus, header select:focus,
         header button:focus-visible, header select:focus-visible {
             outline: 2px solid var(--link);
             outline-offset: 1px;
         }
-        header select { accent-color: var(--link); }
+        header select {
+            accent-color: var(--link);
+            appearance: none;
+            -webkit-appearance: none;
+            padding-right: 1.4rem;
+            background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path d='M1 1l4 4 4-4' fill='none' stroke='%237cb2e8' stroke-width='1.5'/></svg>");
+            background-repeat: no-repeat;
+            background-position: right 0.5rem center;
+        }
         #terminal { padding: 0.8rem 1.2rem; }
     </style>
     <script type="module" src="main.js"></script>
