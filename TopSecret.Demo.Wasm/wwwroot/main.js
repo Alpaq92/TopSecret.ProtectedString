@@ -98,7 +98,10 @@ setModuleImports('main.js', {
     },
 });
 setInterval(() => {
-    if (lineQueue.length) term.writeln(lineQueue.shift());
+    if (lineQueue.length) {
+        term.writeln(lineQueue.shift());
+        term.scrollToBottom(); // keep the newest line in view as output streams
+    }
 }, 14);
 
 const exports = await getAssemblyExports(getConfig().mainAssemblyName);
