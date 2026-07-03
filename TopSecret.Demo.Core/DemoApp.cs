@@ -16,6 +16,7 @@ public static class DemoApp
     public static async Task RunAsync()
     {
         var runStopwatch = Stopwatch.StartNew();
+        long allocatedAtStart = GC.GetTotalAllocatedBytes();
         Console.WriteLine("TopSecret.ProtectedString Demo");
         Console.WriteLine("==================================");
         Console.WriteLine();
@@ -211,21 +212,41 @@ public static class DemoApp
             }
         }
 
-        // 13. Run metrics — printed by the demo itself so the console and
-        //     browser hosts report through the same channel. Peak working
-        //     set is an OS-process concept the WASM sandbox doesn't have.
+        // 13. Run the library's tests live, in-process, via NUnit's
+        //     programmatic runner (NUnitTestAssemblyRunner). Tests not valid
+        //     in this environment self-skip (Argon2 on WASM, the hardware
+        //     tier without a secure element), so the demo shows which
+        //     behaviours actually verify on the host it runs on.
+        Console.WriteLine();
+        Console.WriteLine("  Live test run (representative slice; full suites run in CI):");
+        DemoTestRunner.Run("    ");
+
+        // 14. Run metrics — printed by the demo itself so the console and
+        //     browser hosts report through the same channel.
         runStopwatch.Stop();
+
+        // Allocated THIS run (delta), not process-lifetime cumulative — the
+        // latter only ever grows across repeated runs. Then force a full
+        // collection so the live-heap figure reflects what survives, and so a
+        // "Run again" starts from a flushed heap rather than accumulating the
+        // previous run's garbage.
+        long allocatedThisRun = GC.GetTotalAllocatedBytes() - allocatedAtStart;
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        GC.Collect();
+        long liveHeap = GC.GetTotalMemory(forceFullCollection: false);
+
         Console.WriteLine();
         Console.WriteLine("  Run metrics:");
-        Console.WriteLine($"    total time:           {runStopwatch.ElapsedMilliseconds:N0} ms");
-        Console.WriteLine($"    GC allocated (total): {GC.GetTotalAllocatedBytes() / (1024.0 * 1024.0):F1} MiB");
-        Console.WriteLine($"    GC heap (now):        {GC.GetTotalMemory(forceFullCollection: false) / (1024.0 * 1024.0):F1} MiB");
+        Console.WriteLine($"    total time:            {runStopwatch.ElapsedMilliseconds:N0} ms");
+        Console.WriteLine($"    allocated this run:    {allocatedThisRun / (1024.0 * 1024.0):F1} MiB");
+        Console.WriteLine($"    live heap after GC:    {liveHeap / (1024.0 * 1024.0):F1} MiB");
         if (!OperatingSystem.IsBrowser())
         {
             try
             {
                 using var process = Process.GetCurrentProcess();
-                Console.WriteLine($"    peak working set:     {process.PeakWorkingSet64 / (1024.0 * 1024.0):F1} MiB");
+                Console.WriteLine($"    peak working set:      {process.PeakWorkingSet64 / (1024.0 * 1024.0):F1} MiB");
             }
             catch (PlatformNotSupportedException)
             {

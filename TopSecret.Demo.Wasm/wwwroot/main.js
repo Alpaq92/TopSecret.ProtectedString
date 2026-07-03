@@ -60,12 +60,22 @@ term = new Terminal({
 // Fit addon sizes the terminal grid to fill its container (which flexes to
 // the viewport height) and re-fits on window resize.
 const fitAddon = new FitAddon.FitAddon();
+const terminalEl = document.getElementById('terminal');
 term.loadAddon(fitAddon);
-term.open(document.getElementById('terminal'));
-const refit = () => { try { fitAddon.fit(); } catch { /* pre-open */ } };
-refit();
-window.addEventListener('resize', refit);
+term.open(terminalEl);
+
+// Write at the default grid size first so output is never lost, THEN fit —
+// only when the container actually has a size (a zero-size fit would set
+// 0 rows and swallow every subsequent write). Fit on the next frame (after
+// layout) and on resize.
 term.writeln('Loading .NET WebAssembly runtime…');
+const refit = () => {
+    if (terminalEl.clientHeight > 0 && terminalEl.clientWidth > 0) {
+        try { fitAddon.fit(); } catch { /* ignore transient sizing errors */ }
+    }
+};
+requestAnimationFrame(refit);
+window.addEventListener('resize', refit);
 
 // create() instantiates and starts the runtime WITHOUT running Main. We
 // never call dotnet.run()/runMain() — both EXIT the runtime when Main
@@ -77,18 +87,30 @@ const { setModuleImports, getAssemblyExports, getConfig } = await dotnet
     .withDiagnosticTracing(false)
     .create();
 
+// The WASM demo produces all its output synchronously, then returns; if we
+// wrote each line straight to xterm the whole run would paint in one frame.
+// Instead C# enqueues completed lines here and a render loop drains them one
+// line per ~14 ms, giving a live, line-by-line feel.
+const lineQueue = [];
 setModuleImports('main.js', {
     term: {
-        write: (text) => term.write(text),
+        enqueue: (line) => lineQueue.push(line),
     },
 });
+setInterval(() => {
+    if (lineQueue.length) term.writeln(lineQueue.shift());
+}, 14);
 
 const exports = await getAssemblyExports(getConfig().mainAssemblyName);
 const rerun = document.getElementById('rerun');
 
-async function runDemo() {
+async function runDemo(initialDelayMs) {
     rerun.disabled = true;
+    // Flush the terminal immediately so the clear is visible, then pause
+    // briefly before the new output starts streaming in.
     term.clear();
+    lineQueue.length = 0;
+    if (initialDelayMs) await new Promise((r) => setTimeout(r, initialDelayMs));
     try {
         await exports.TopSecret.DemoWasm.Program.RunDemo();
     } finally {
@@ -96,5 +118,5 @@ async function runDemo() {
     }
 }
 
-rerun.addEventListener('click', runDemo);
-await runDemo(); // initial pass
+rerun.addEventListener('click', () => runDemo(1000)); // clear, ~1s pause, then stream
+await runDemo(0); // initial pass streams right away

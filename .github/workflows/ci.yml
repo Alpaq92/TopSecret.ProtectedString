@@ -75,29 +75,12 @@ jobs:
       - name: Build
         run: dotnet build TopSecret.ProtectedString.sln --configuration Release --no-restore
 
-      # AOT publish dry-run. Native-AOT-compiles the Demo executable, which
-      # consumes the main library — so the AOT analyzers (already enabled at
-      # build time via IsAotCompatible) and the IL→native compiler both run
-      # against the full dependency graph the library exposes. Catches
-      # AOT-incompatibilities the build-time analyzers miss (e.g. link-time
-      # symbol resolution, transitive trim warnings). ubuntu-latest only —
-      # GitHub's Linux image ships build-essential + clang preinstalled, so
-      # no extra prerequisite step is needed; the same on windows-latest
-      # would require the Visual Studio C++ workload, which we'd rather not
-      # depend on.
-      - name: AOT publish dry-run (linux-x64)
-        if: matrix.os == 'ubuntu-latest'
-        # TreatWarningsAsErrors=true makes any IL2026 / IL2050 / IL3050 /
-        # transitive trim warning fail the step. If a third-party dep (e.g.
-        # Konscious.Security.Cryptography.Argon2) emits AOT-incompatibility
-        # warnings, this step turns them into a visible CI failure rather
-        # than letting them sit quietly in the build log.
-        # AotDryRun (not -p:PublishAot=true) so PublishAot applies to the Demo
-        # Exe only — a global PublishAot property propagates to the whole build
-        # graph and the netstandard2.0 analyzer project fails it (NETSDK1207).
-        # No --no-restore: the AOT publish needs a linux-x64 + ILCompiler
-        # restore the plain restore above didn't acquire.
-        run: dotnet publish TopSecret.Demo/TopSecret.Demo.csproj --configuration Release --framework net10.0 --runtime linux-x64 -p:AotDryRun=true -p:TreatWarningsAsErrors=true --self-contained
+      # AOT-compatibility of the SHIPPED library is enforced at build time by
+      # <IsAotCompatible>true> on TopSecret.ProtectedString / .ProtectedBlob
+      # (the IL2026/IL2050/IL3050 analyzers run on every build above, and CI
+      # has TreatWarningsAsErrors). A separate AOT publish dry-run of the Demo
+      # is no longer meaningful: the Demo now runs its scenarios' tests live
+      # via NUnit, which is reflection-based and deliberately not AOT-clean.
 
       - name: Test (cross-platform)
         if: matrix.os != 'ubuntu-latest'

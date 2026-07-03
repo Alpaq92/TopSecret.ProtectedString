@@ -52,39 +52,48 @@ public static partial class Program
         }
     }
 
-    [JSImport("term.write", "main.js")]
-    internal static partial void TerminalWrite(string text);
+    // Enqueue one completed line to the JS side. main.js drains the queue at
+    // one line per animation tick, so the WASM runtime can produce all output
+    // synchronously (fast) while xterm renders it line-by-line rather than
+    // dumping the whole run at once.
+    [JSImport("term.enqueue", "main.js")]
+    internal static partial void EnqueueLine(string line);
 
     /// <summary>
-    /// A <see cref="TextWriter"/> that forwards to xterm.js. The writer
-    /// emits plain <c>\n</c>; xterm.js performs the <c>\n</c> → <c>\r\n</c>
-    /// translation (<c>convertEol: true</c> in <c>main.js</c>). JS interop
-    /// is batched per flushed segment, not per character.
+    /// A <see cref="TextWriter"/> that hands each completed line to the JS
+    /// render queue (see <see cref="EnqueueLine"/>). Buffers partial lines
+    /// until their newline, then enqueues without the trailing newline.
     /// </summary>
     private sealed class TerminalWriter : TextWriter
     {
-        private readonly StringBuilder _buffer = new();
+        private readonly StringBuilder _line = new();
 
         public override Encoding Encoding => Encoding.UTF8;
 
         public override void Write(char value)
         {
-            _buffer.Append(value);
-            if (value == '\n') Flush();
+            if (value == '\n')
+            {
+                EnqueueLine(_line.ToString());
+                _line.Clear();
+            }
+            else if (value != '\r')
+            {
+                _line.Append(value);
+            }
         }
 
         public override void Write(string? value)
         {
             if (string.IsNullOrEmpty(value)) return;
-            _buffer.Append(value);
-            if (value.Contains('\n')) Flush();
+            foreach (var c in value) Write(c);
         }
 
         public override void Flush()
         {
-            if (_buffer.Length == 0) return;
-            TerminalWrite(_buffer.ToString());
-            _buffer.Clear();
+            if (_line.Length == 0) return;
+            EnqueueLine(_line.ToString());
+            _line.Clear();
         }
     }
 }

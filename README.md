@@ -1,12 +1,20 @@
 # TopSecret.ProtectedString
 
-[![NuGet: TopSecret.ProtectedString](https://img.shields.io/nuget/v/TopSecret.ProtectedString.svg?label=TopSecret.ProtectedString)](https://www.nuget.org/packages/TopSecret.ProtectedString) [![NuGet: .WindowsTpm](https://img.shields.io/nuget/v/TopSecret.ProtectedString.WindowsTpm.svg?label=.WindowsTpm)](https://www.nuget.org/packages/TopSecret.ProtectedString.WindowsTpm) [![NuGet: .LinuxTpm](https://img.shields.io/nuget/v/TopSecret.ProtectedString.LinuxTpm.svg?label=.LinuxTpm)](https://www.nuget.org/packages/TopSecret.ProtectedString.LinuxTpm) [![NuGet: .Configuration](https://img.shields.io/nuget/v/TopSecret.ProtectedString.Configuration.svg?label=.Configuration)](https://www.nuget.org/packages/TopSecret.ProtectedString.Configuration) [![NuGet: TopSecret.ProtectedBlob](https://img.shields.io/nuget/v/TopSecret.ProtectedBlob.svg?label=TopSecret.ProtectedBlob)](https://www.nuget.org/packages/TopSecret.ProtectedBlob) [![CI](https://img.shields.io/github/actions/workflow/status/Alpaq92/TopSecret.ProtectedString/ci.yml?branch=master&label=CI)](https://github.com/Alpaq92/TopSecret.ProtectedString/actions/workflows/ci.yml) [![Live demo](https://img.shields.io/badge/demo-GitHub%20Pages-2ea44f)](https://alpaq92.github.io/TopSecret.ProtectedString/) [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+<div align="center">
+
+[![NuGet: TopSecret.ProtectedString](https://img.shields.io/nuget/v/TopSecret.ProtectedString.svg?label=TopSecret.ProtectedString)](https://www.nuget.org/packages/TopSecret.ProtectedString) [![NuGet: .WindowsTpm](https://img.shields.io/nuget/v/TopSecret.ProtectedString.WindowsTpm.svg?label=.WindowsTpm)](https://www.nuget.org/packages/TopSecret.ProtectedString.WindowsTpm) [![NuGet: .LinuxTpm](https://img.shields.io/nuget/v/TopSecret.ProtectedString.LinuxTpm.svg?label=.LinuxTpm)](https://www.nuget.org/packages/TopSecret.ProtectedString.LinuxTpm) [![NuGet: .Configuration](https://img.shields.io/nuget/v/TopSecret.ProtectedString.Configuration.svg?label=.Configuration)](https://www.nuget.org/packages/TopSecret.ProtectedString.Configuration) [![NuGet: TopSecret.ProtectedBlob](https://img.shields.io/nuget/v/TopSecret.ProtectedBlob.svg?label=TopSecret.ProtectedBlob)](https://www.nuget.org/packages/TopSecret.ProtectedBlob)
+
+[![CI](https://img.shields.io/github/actions/workflow/status/Alpaq92/TopSecret.ProtectedString/ci.yml?branch=master&label=CI)](https://github.com/Alpaq92/TopSecret.ProtectedString/actions/workflows/ci.yml) [![Live demo](https://img.shields.io/badge/demo-GitHub%20Pages-2ea44f)](https://alpaq92.github.io/TopSecret.ProtectedString/) [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
+**▶ [Try the live demo in your browser](https://alpaq92.github.io/TopSecret.ProtectedString/)** — the full scenario walkthrough plus a live NUnit run, entirely client-side on .NET WebAssembly.
+
+</div>
 
 A cross-platform, .NET 10 alternative to `System.Security.SecureString` that actually encrypts its contents at rest in process memory on every supported platform — Windows, Linux, macOS, Android, iOS, Mac Catalyst, and browser WebAssembly.
 
 > Microsoft now [recommends against using `SecureString` for new code](https://learn.microsoft.com/dotnet/api/system.security.securestring#remarks), partly because on non-Windows platforms it does not encrypt the buffer at all. This library is meant to fill that gap with the same usage shape developers already know. See [Replacing `SecureString`](#replacing-securestring) for the side-by-side and the migration mapping.
 
-Two front-line packages ship from this repo: **`TopSecret.ProtectedString`** for credential-sized secrets and **[`TopSecret.ProtectedBlob`](#protectedblob-large-secret-blobs)** for multi-MB secret byte blobs — plus satellite packages for [TPM-backed key wrapping](#key-at-rest-wrapping-opt-in-tiered) and [configuration binding](#configuration-binding-from-appsettingsjson).
+Two front-line packages ship from this repo and cover the two ends of the spectrum: **`TopSecret.ProtectedString`** for credential-sized secrets like passwords and tokens, and **[`TopSecret.ProtectedBlob`](#protectedblob-large-secret-blobs)** for multi-MB secret byte blobs — plus optional satellite packages for [TPM-backed key wrapping](#key-at-rest-wrapping-opt-in-tiered) and [configuration binding](#configuration-binding-from-appsettingsjson).
 
 ## Table of contents
 
@@ -375,7 +383,9 @@ A runnable end-to-end demo lives in [`TopSecret.Demo`](TopSecret.Demo):
 dotnet run --project TopSecret.Demo
 ```
 
-The same scenarios also run **fully client-side in the browser**: [`TopSecret.Demo.Wasm`](TopSecret.Demo.Wasm) wraps the shared `DemoApp` in an [xterm.js](https://github.com/xtermjs/xterm.js) terminal on .NET WebAssembly and is deployed to GitHub Pages by [`pages.yml`](.github/workflows/pages.yml) on every release. In the browser the demo uses the library's `net10.0-browser` build (BouncyCastle AES-GCM); the Argon2id credential scenario is skipped there — see the `browser-wasm` caveats.
+The same scenarios also run **fully client-side in the browser**: [`TopSecret.Demo.Wasm`](TopSecret.Demo.Wasm) wraps the shared `DemoApp` (in [`TopSecret.Demo.Core`](TopSecret.Demo.Core)) in an [xterm.js](https://github.com/xtermjs/xterm.js) terminal on .NET WebAssembly and is deployed to GitHub Pages by [`pages.yml`](.github/workflows/pages.yml) on every push to master. In the browser the demo uses the library's `net10.0-browser` build (BouncyCastle AES-GCM); the Argon2id scenario is skipped there — see the `browser-wasm` caveats.
+
+Both hosts finish by **running a representative NUnit slice live, in-process** ([`DemoTests`](TopSecret.Demo.Core/DemoTests.cs) via [`DemoTestRunner`](TopSecret.Demo.Core/DemoTestRunner.cs)) and reporting per-test PASS/SKIP/FAIL. Tests that aren't valid on the host self-skip (`Assert.Ignore`) — Argon2id on the single-threaded WASM runtime, the hardware-backed tier where no TPM/Secure Enclave/Keystore is present — so the demo shows exactly which behaviours verify where it runs. (The exhaustive suites — tamper matrices, wire-format pinning, rotation, TPM — run in CI, not the demo.)
 
 The demo exercises every public-facing pattern:
 
@@ -1068,8 +1078,9 @@ TopSecret.ProtectedString.Analyzers.Tests/       # NUnit 4 analyzer detection-ru
 TopSecret.ProtectedString.Configuration.Tests/   # NUnit 4 configuration-binding tests
 TopSecret.ProtectedString.WindowsTpm.Tests/      # NUnit 4 Windows-only smoke tests
 TopSecret.ProtectedString.LinuxTpm.Tests/        # NUnit 4 Linux-only smoke tests
-TopSecret.Demo/                                  # runnable console demo (the .slnLaunch sets this as the default startup project)
-TopSecret.Demo.Wasm/                             # browser demo: DemoApp in xterm.js on .NET WebAssembly, deployed to GitHub Pages per release (not in the .sln — needs wasm-tools)
+TopSecret.Demo.Core/                             # shared demo scenarios + DemoTests + the in-process NUnit runner (net10.0 library)
+TopSecret.Demo/                                  # runnable console demo host (the .slnLaunch sets this as the default startup project)
+TopSecret.Demo.Wasm/                             # browser demo host: Demo.Core in xterm.js on .NET WebAssembly, deployed to GitHub Pages per push (not in the .sln — needs wasm-tools)
 TopSecret.ProtectedString.sln
 TopSecret.ProtectedString.slnLaunch              # committed VS launch profile pinning the Demo project
 Directory.Build.props                            # release-time PackageReleaseNotes injection (reads release_notes.txt when the file exists)
