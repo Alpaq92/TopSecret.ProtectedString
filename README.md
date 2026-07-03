@@ -6,9 +6,9 @@
 
 [![CI](https://img.shields.io/github/actions/workflow/status/Alpaq92/TopSecret.ProtectedString/ci.yml?branch=master&label=CI)](https://github.com/Alpaq92/TopSecret.ProtectedString/actions/workflows/ci.yml) [![Live demo](https://img.shields.io/badge/demo-GitHub%20Pages-2ea44f)](https://alpaq92.github.io/TopSecret.ProtectedString/) [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-**▶ [Try the live demo in your browser](https://alpaq92.github.io/TopSecret.ProtectedString/)** — the full scenario walkthrough plus a live NUnit run, entirely client-side on .NET WebAssembly.
-
 </div>
+
+**▶ [Try the live demo in your browser](https://alpaq92.github.io/TopSecret.ProtectedString/)** — the full scenario walkthrough plus a live NUnit run, all executing on the actual library, entirely client-side on .NET WebAssembly with no server involved.
 
 A cross-platform, .NET 10 alternative to `System.Security.SecureString` that actually encrypts its contents at rest in process memory on every supported platform — Windows, Linux, macOS, Android, iOS, Mac Catalyst, and browser WebAssembly.
 
