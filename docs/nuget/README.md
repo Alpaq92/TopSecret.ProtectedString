@@ -1,6 +1,6 @@
 # TopSecret
 
-A small suite of .NET packages for keeping secrets safe **in memory**. It exists because `SecureString` never got a cross-platform story — its encryption is Windows-only and Microsoft advises against it for new code — yet real applications still hold passwords, tokens, and key material in plain strings and arrays that any heap dump, crash report, or memory scan can read. With TopSecret, secrets live AES-GCM-256-encrypted under a per-process (optionally hardware-backed) key, plaintext surfaces only briefly inside escape-resistant span callbacks, and every scratch buffer is pinned, locked, and wiped on exit.
+A small suite of .NET packages for keeping secrets safe **in memory**. It exists because `SecureString` never got a cross-platform story — its encryption is Windows-only and Microsoft advises against it for new code — yet real applications still hold passwords, API tokens, and cryptographic key material in plain strings and arrays that any heap dump, swap file, crash report, or memory scan can read. With TopSecret, secrets live AES-GCM-256-encrypted under a per-process (optionally hardware-backed) key, plaintext surfaces only briefly inside escape-resistant span callbacks, and every scratch buffer is pinned, locked, and wiped on exit.
 
 ## Packages
 
