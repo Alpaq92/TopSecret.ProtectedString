@@ -1,18 +1,34 @@
 # CodeRabbit configuration — https://docs.coderabbit.ai/reference/configuration
 # The CodeRabbit GitHub App must be installed on this repository
 # (https://github.com/apps/coderabbitai) for reviews to run; this file only
-# configures its behavior once installed. Its PR approvals count toward the
-# ruleset's required-approval gate, satisfying "maintainer OR CodeRabbit".
+# configures its behavior once installed. Its PR reviews count toward the
+# ruleset's required-approval gate ("maintainer OR CodeRabbit") because
+# request_changes_workflow is true below — see that setting for why this is
+# the only configuration where that sentence is actually true.
 
 language: "en-US"
 
 reviews:
   profile: "assertive"
-  # Non-blocking: CodeRabbit posts comments/suggestions but does NOT submit
-  # CHANGES_REQUESTED reviews, which would wedge the required-approval gate on
-  # every nitpick. The gate is satisfied by a maintainer's (or CodeRabbit's)
-  # APPROVE; CodeRabbit advises rather than blocks.
-  request_changes_workflow: false
+  # true: CodeRabbit submits a REAL GitHub review — APPROVE when it finds
+  # nothing actionable (satisfies required_approving_review_count: 1 on its
+  # own, no human needed), CHANGES_REQUESTED when it does (blocks merge until
+  # addressed or dismissed).
+  #
+  # Previously ran at false (comment-only: never approves, never blocks) so a
+  # nitpick couldn't wedge a PR — but that silently broke the "OR CodeRabbit"
+  # half of the gate, since a comment is not a GitHub approval. In practice
+  # this repo's first PR (the 0.1.0 release PR) still got wedged anyway, on a
+  # genuine CHANGES_REQUESTED review filed just before `false` took effect;
+  # dismiss_stale_reviews_on_push didn't clear it because the fixing commits
+  # landed on master directly rather than on the release PR's own branch, so
+  # GitHub never saw a push to dismiss the stale review against — it needed a
+  # manual dismissal. Net effect of `false`: all of the blocking risk, none of
+  # the "OR CodeRabbit" benefit. Reverted to `true`, accepting that a real
+  # CHANGES_REQUESTED can wedge a PR again. If a release-please PR gets stuck
+  # the same way: comment `@coderabbitai review` to re-run against the
+  # current diff, or dismiss the review manually — same recovery as before.
+  request_changes_workflow: true
   high_level_summary: true
   poem: false
   review_status: true
