@@ -35,19 +35,24 @@ public static class DemoApp
         Console.WriteLine($"  Obscurity wrap (if reached):  {(OperatingSystem.IsWindows() ? "AES-GCM-256 with per-protector random wrap key" : "HKDF stream-XOR")}");
         Console.WriteLine();
 
+        // Every run works on fresh random inputs (DemoInputs), so the lengths,
+        // hashes and checksums below change from run to run — proof the output
+        // is computed live, not replayed.
+
         // 1. Wrap an existing string.
         //    (See README for the caveat — string is immutable, so the original lives on
         //    in the GC heap until collected. Prefer (2) or (3) when you can.)
-        using var fromString = new ProtectedString("hunter2");
+        string secretValue = DemoInputs.RandomSecret();
+        using var fromString = new ProtectedString(secretValue);
         Print("from string ctor:", fromString);
 
         // 2. Wrap a span. The span content is copied into the encrypted buffer.
-        using var fromSpan = new ProtectedString("correct horse battery staple".AsSpan());
+        using var fromSpan = new ProtectedString(DemoInputs.RandomSecret().AsSpan());
         Print("from span ctor:", fromSpan);
 
         // 3. Build incrementally, then lock down.
         using var built = new ProtectedString();
-        foreach (var c in "p4ssw0rd!")
+        foreach (var c in DemoInputs.RandomSecret())
         {
             built.AppendChar(c);
         }
@@ -97,18 +102,20 @@ public static class DemoApp
         //    then does with the bytes is the caller's responsibility.
 
         // 7. Constant-time equality.
-        using var a = new ProtectedString("topsecret");
-        using var b = new ProtectedString("topsecret");
-        using var c2 = new ProtectedString("topSecret");
+        string equalValue = DemoInputs.RandomSecret();
+        using var a = new ProtectedString(equalValue);
+        using var b = new ProtectedString(equalValue);
+        using var c2 = new ProtectedString(DemoInputs.MutateOneChar(equalValue));
         Console.WriteLine();
         Console.WriteLine($"  a.Equals(b) (same value)      = {a.Equals(b)}");
         Console.WriteLine($"  a.Equals(c) (different value) = {a.Equals(c2)}");
 
         // 8. Credential verification — Argon2id with OWASP-aligned defaults.
-        //    Runs in the browser too: the library's default parallelism is 1
-        //    (a single lane), so the managed Argon2 does not need the worker
-        //    threads the single-threaded WASM runtime lacks — only p>1 would.
-        //    Guarded so any host that still can't run it degrades gracefully.
+        //    Honest status: NOT supported on the single-threaded browser
+        //    runtime — the library throws PlatformNotSupportedException there
+        //    (Konscious's KDF cannot complete on one thread, and an async
+        //    wrapper was evaluated and rejected on security grounds — see the
+        //    README's browser-wasm section). The demo degrades gracefully.
         Console.WriteLine();
         try
         {
@@ -118,14 +125,15 @@ public static class DemoApp
             sw.Stop();
             Console.WriteLine($"  Argon2id hash ({sw.ElapsedMilliseconds} ms, OWASP defaults: t=3, m=19 MiB, p=1)");
 
-            using var rightAttempt = new ProtectedString("hunter2");
-            using var wrongAttempt = new ProtectedString("Hunter2");
+            using var rightAttempt = new ProtectedString(secretValue);
+            using var wrongAttempt = new ProtectedString(DemoInputs.MutateOneChar(secretValue));
             Console.WriteLine($"    rightAttempt.VerifyArgon2idHash(stored) = {rightAttempt.VerifyArgon2idHash(stored, salt)}");
             Console.WriteLine($"    wrongAttempt.VerifyArgon2idHash(stored) = {wrongAttempt.VerifyArgon2idHash(stored, salt)}");
         }
-        catch (Exception ex) when (ex is PlatformNotSupportedException or System.Threading.ThreadStateException)
+        catch (PlatformNotSupportedException)
         {
-            Console.WriteLine($"  Argon2id credential verification: unavailable on this host ({ex.GetType().Name}).");
+            Console.WriteLine("  Argon2id credential verification: not supported on this host (browser/WASM) —");
+            Console.WriteLine("  hash server-side; see the README's browser-wasm section for the rationale.");
         }
 
         // 9. ToString never leaks the protected value, so accidental logging is safe.
@@ -178,7 +186,9 @@ public static class DemoApp
         Console.WriteLine();
         Console.WriteLine("  ProtectedBlob (bulk secrets):");
 
-        var payload = RandomNumberGenerator.GetBytes(2_000_000); // e.g. a sealed asset / model shard
+        // ~2 MB of fresh random bytes, size jittered per run (e.g. a sealed
+        // asset / model shard) — so the chunk count varies between runs too.
+        var payload = RandomNumberGenerator.GetBytes(RandomNumberGenerator.GetInt32(1_800_000, 2_200_001));
         var payloadHashHex = Convert.ToHexString(SHA256.HashData(payload));
         using (var blob = new ProtectedBlob(payload, clearSource: true))
         {
@@ -210,14 +220,16 @@ public static class DemoApp
             }
         }
 
-        // 13. Run the library's tests live, in-process, via NUnit's
-        //     programmatic runner (NUnitTestAssemblyRunner). Tests not valid
-        //     in this environment self-skip (Argon2 on WASM, the hardware
-        //     tier without a secure element), so the demo shows which
-        //     behaviours actually verify on the host it runs on.
+        // 13. Run the library's tests live, in-process, via the reflection-
+        //     based DemoTestRunner (NUnit's own NUnitTestAssemblyRunner spawns
+        //     a worker thread, which the single-threaded WASM runtime cannot
+        //     do). Tests not valid in this environment self-skip (Argon2 where
+        //     unavailable, the hardware tier without a secure element), so the
+        //     demo shows which behaviours actually verify on the host it runs
+        //     on.
         Console.WriteLine();
         Console.WriteLine("  Live test run (representative slice; full suites run in CI):");
-        DemoTestRunner.Run("    ");
+        await DemoTestRunner.RunAsync("    ");
 
         // 14. Run metrics — printed by the demo itself so the console and
         //     browser hosts report through the same channel.

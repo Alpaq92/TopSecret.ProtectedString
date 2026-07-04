@@ -12,7 +12,9 @@ namespace TopSecret.Demo;
 /// thread, which throws <see cref="System.Threading.ThreadStateException"/>
 /// on the single-threaded WASM runtime. So this is a minimal runner that
 /// discovers <c>[Test]</c> methods by reflection and invokes them on the
-/// calling thread, classifying the outcome from NUnit's own result
+/// calling thread (awaiting <see cref="Task"/>-returning async tests rather
+/// than fire-and-forgetting them, which would report false PASSes),
+/// classifying the outcome from NUnit's own result
 /// exceptions — <see cref="IgnoreException"/> (from <c>Assert.Ignore</c>) and
 /// <see cref="InconclusiveException"/> become SKIP, <see cref="SuccessException"/>
 /// (from <c>Assert.Pass</c>) and a clean return are PASS, and
@@ -23,7 +25,7 @@ namespace TopSecret.Demo;
 /// </remarks>
 public static class DemoTestRunner
 {
-    public static void Run(string indent = "")
+    public static async Task RunAsync(string indent = "")
     {
         int passed = 0, skipped = 0, failed = 0;
         var start = System.Diagnostics.Stopwatch.StartNew();
@@ -33,7 +35,9 @@ public static class DemoTestRunner
             object? instance;
             try
             {
-                instance = Activator.CreateInstance(fixture);
+                // Null-forgiving: CreateInstance only returns null for
+                // Nullable<T>, which a [TestFixture] class can never be.
+                instance = Activator.CreateInstance(fixture)!;
             }
             catch (Exception ex)
             {
@@ -47,7 +51,7 @@ public static class DemoTestRunner
                          .Where(m => m.GetCustomAttribute<TestAttribute>() is not null)
                          .OrderBy(m => m.Name))
             {
-                switch (RunOne(instance, test, indent))
+                switch (await RunOneAsync(instance, test, indent))
                 {
                     case Outcome.Pass: passed++; break;
                     case Outcome.Skip: skipped++; break;
@@ -66,11 +70,15 @@ public static class DemoTestRunner
 
     private enum Outcome { Pass, Skip, Fail }
 
-    private static Outcome RunOne(object instance, MethodInfo test, string indent)
+    private static async Task<Outcome> RunOneAsync(object instance, MethodInfo test, string indent)
     {
         try
         {
-            test.Invoke(instance, null);
+            // Await async Task tests instead of fire-and-forgetting them —
+            // never block on the Task (a .Wait()/.Result here would deadlock
+            // the single-threaded WASM runtime, the very bug this runner
+            // exists to avoid).
+            if (test.Invoke(instance, null) is Task task) await task;
             Report(indent, "PASS", test.Name);
             return Outcome.Pass;
         }
