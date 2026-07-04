@@ -2,8 +2,8 @@ using System.Diagnostics;
 using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
-using Konscious.Security.Cryptography;
 using TopSecret;
+using TopSecret.Cryptography;
 
 namespace TopSecret.ProtectedStringTests;
 
@@ -297,7 +297,7 @@ public class ProtectedStringTests
         using var ps = new ProtectedString(value.AsSpan());
         var actual = ps.ComputeArgon2idHash(salt, FastIterations, FastMemoryKb, FastParallelism, FastHashLength);
 
-        // Compute the reference hash directly via Konscious for parity.
+        // Compute the reference hash directly via the underlying Argon2 library for parity.
         using var argon = new Argon2id(Encoding.UTF8.GetBytes(value))
         {
             Salt = salt,

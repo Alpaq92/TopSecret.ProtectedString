@@ -4,7 +4,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
-using Konscious.Security.Cryptography;
+using TopSecret.Cryptography;
 
 namespace TopSecret;
 
@@ -851,9 +851,11 @@ public sealed class ProtectedString : IDisposable, IEquatable<ProtectedString>
     /// hash computation and wiped on the way out. Argon2id is intentionally
     /// slow — picking parameters too low defeats the point, picking them too
     /// high stalls your authentication path. Tune for your hardware.
-    /// Not supported on the single-threaded browser (WASM) runtime — throws
-    /// <see cref="PlatformNotSupportedException"/> there; hash credentials
-    /// server-side (see the README's browser-wasm section for the rationale).
+    /// Works on the single-threaded browser (WASM) runtime at the default
+    /// <paramref name="parallelism"/> = 1 (see <see cref="DefaultArgon2idParallelism"/>);
+    /// raising <paramref name="parallelism"/> above 1 there throws
+    /// <see cref="PlatformNotSupportedException"/> — see the README's
+    /// browser-wasm section for why that ceiling is permanent, not a bug.
     /// See the <a href="https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html">OWASP
     /// Password Storage Cheat Sheet</a> for current guidance.
     /// </remarks>
@@ -870,26 +872,6 @@ public sealed class ProtectedString : IDisposable, IEquatable<ProtectedString>
         if (memoryKb < 8) throw new ArgumentOutOfRangeException(nameof(memoryKb));
         if (parallelism < 1) throw new ArgumentOutOfRangeException(nameof(parallelism));
         if (hashLengthBytes < 16) throw new ArgumentOutOfRangeException(nameof(hashLengthBytes));
-
-        // Honest fail-fast: Argon2id is NOT supported on the single-threaded
-        // browser runtime. Konscious has no truly synchronous path — its
-        // GetBytes is Task.Run(...).Result, and the lane work queued to the
-        // thread pool needs the very thread .Result blocks (kmaragon/
-        // Konscious.Security.Cryptography#22). An awaited async wrapper was
-        // prototyped and adversarially reviewed, then rejected: releasing the
-        // instance lock across the KDF await demonstrably regresses the sync
-        // path's security invariants (overlapping pinned scratch copies under
-        // page-granular non-refcounted mlock, a lost "Dispose returned ⇒ no
-        // plaintext" barrier, stale-verify linearization races), and the gate
-        // machinery required to restore them is more concurrency surface than
-        // this type should carry. See the README's browser-wasm section.
-        if (OperatingSystem.IsBrowser())
-        {
-            throw new PlatformNotSupportedException(
-                "Argon2id is not supported on the single-threaded browser (WASM) runtime — the " +
-                "underlying KDF cannot complete there. Hash credentials server-side instead; see " +
-                "the README's `browser-wasm` support section for the full rationale.");
-        }
 
         lock (_sync)
         {

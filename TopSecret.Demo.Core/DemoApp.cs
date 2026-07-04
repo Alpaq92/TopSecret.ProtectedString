@@ -111,30 +111,21 @@ public static class DemoApp
         Console.WriteLine($"  a.Equals(c) (different value) = {a.Equals(c2)}");
 
         // 8. Credential verification — Argon2id with OWASP-aligned defaults.
-        //    Honest status: NOT supported on the single-threaded browser
-        //    runtime — the library throws PlatformNotSupportedException there
-        //    (Konscious's KDF cannot complete on one thread, and an async
-        //    wrapper was evaluated and rejected on security grounds — see the
-        //    README's browser-wasm section). The demo degrades gracefully.
+        //    Runs everywhere, including the browser: at the library's default
+        //    parallelism of 1, the KDF's lane runs inline on the calling
+        //    thread rather than via the thread pool, so it never needs a
+        //    second thread the single-threaded WASM runtime doesn't have.
         Console.WriteLine();
-        try
-        {
-            var salt = RandomNumberGenerator.GetBytes(16);
-            var sw = Stopwatch.StartNew();
-            var stored = fromString.ComputeArgon2idHash(salt);
-            sw.Stop();
-            Console.WriteLine($"  Argon2id hash ({sw.ElapsedMilliseconds} ms, OWASP defaults: t=3, m=19 MiB, p=1)");
+        var salt = RandomNumberGenerator.GetBytes(16);
+        var sw = Stopwatch.StartNew();
+        var stored = fromString.ComputeArgon2idHash(salt);
+        sw.Stop();
+        Console.WriteLine($"  Argon2id hash ({sw.ElapsedMilliseconds} ms, OWASP defaults: t=3, m=19 MiB, p=1)");
 
-            using var rightAttempt = new ProtectedString(secretValue);
-            using var wrongAttempt = new ProtectedString(DemoInputs.MutateOneChar(secretValue));
-            Console.WriteLine($"    rightAttempt.VerifyArgon2idHash(stored) = {rightAttempt.VerifyArgon2idHash(stored, salt)}");
-            Console.WriteLine($"    wrongAttempt.VerifyArgon2idHash(stored) = {wrongAttempt.VerifyArgon2idHash(stored, salt)}");
-        }
-        catch (PlatformNotSupportedException)
-        {
-            Console.WriteLine("  Argon2id credential verification: not supported on this host (browser/WASM) —");
-            Console.WriteLine("  hash server-side; see the README's browser-wasm section for the rationale.");
-        }
+        using var rightAttempt = new ProtectedString(secretValue);
+        using var wrongAttempt = new ProtectedString(DemoInputs.MutateOneChar(secretValue));
+        Console.WriteLine($"    rightAttempt.VerifyArgon2idHash(stored) = {rightAttempt.VerifyArgon2idHash(stored, salt)}");
+        Console.WriteLine($"    wrongAttempt.VerifyArgon2idHash(stored) = {wrongAttempt.VerifyArgon2idHash(stored, salt)}");
 
         // 9. ToString never leaks the protected value, so accidental logging is safe.
         Console.WriteLine();
@@ -223,10 +214,9 @@ public static class DemoApp
         // 13. Run the library's tests live, in-process, via the reflection-
         //     based DemoTestRunner (NUnit's own NUnitTestAssemblyRunner spawns
         //     a worker thread, which the single-threaded WASM runtime cannot
-        //     do). Tests not valid in this environment self-skip (Argon2 where
-        //     unavailable, the hardware tier without a secure element), so the
-        //     demo shows which behaviours actually verify on the host it runs
-        //     on.
+        //     do). Tests not valid in this environment self-skip (the
+        //     hardware tier where no secure element is present), so the demo
+        //     shows which behaviours actually verify on the host it runs on.
         Console.WriteLine();
         Console.WriteLine("  Live test run (representative slice; full suites run in CI):");
         await DemoTestRunner.RunAsync("    ");

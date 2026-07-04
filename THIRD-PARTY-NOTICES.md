@@ -23,7 +23,7 @@ MIT License  -- https://opensource.org/licenses/MIT
 
 
 Runtime dependencies (resolved transitively by the published NuGet packages):
-  - Konscious.Security.Cryptography.Argon2 -- Argon2id KDF used by ComputeArgon2idHash and VerifyArgon2idHash.   https://github.com/kmaragon/Konscious.Security.Cryptography
+  - TopSecret.Cryptography.Argon2 -- Argon2id KDF used by ComputeArgon2idHash and VerifyArgon2idHash. A maintained fork of Konscious.Security.Cryptography.Argon2, adopted because upstream's synchronous GetBytes cannot complete on the single-threaded browser-wasm runtime (see the README's Argon2id section). "Original work Copyright (c) 2017 Keef Aragon; fork additions Copyright (c) 2026 Alpaq92" per the fork's own LICENSE.   https://github.com/Alpaq92/TopSecret.Cryptography (fork of https://github.com/kmaragon/Konscious.Security.Cryptography)
   - Microsoft.TSS -- Microsoft Research's TPM Software Stack; runtime dependency of the optional TopSecret.ProtectedString.LinuxTpm subpackage for TPM 2.0 command marshalling against /dev/tpmrm0.   https://github.com/microsoft/TSS.MSR
 
 Build-time-only dependencies (PrivateAssets="all"; not shipped in the NuGet output):

@@ -55,7 +55,7 @@ No CI runner exists for real iOS/Android hardware (see [CI matrix and runner ava
 
 1. Build and run `TopSecret.Demo` (or a minimal test host) targeting `net10.0-ios` / `net10.0-android` and deploy to a real device — not just the simulator/emulator, which typically report `HardwareBackedAvailability.NoProviderForThisPlatform` regardless of what real hardware would say.
 2. Confirm `ProtectedString.HardwareBackedAvailability` reports the expected tier (Secure Enclave on a real iPhone, Android Keystore on a real Android device) and that a construct → `Access` → dispose round-trip through that tier succeeds.
-3. Run `ComputeArgon2idHash` / `VerifyArgon2idHash` on-device — Konscious relies on the thread pool, and mobile OS scheduling can differ from desktop.
+3. Run `ComputeArgon2idHash` / `VerifyArgon2idHash` on-device — the underlying KDF (`TopSecret.Cryptography.Argon2`) still touches the thread pool for lanes beyond the first, and mobile OS thread-pool scheduling can differ from desktop.
 4. Watch for crashes or wrong output around `AppendChar` build-mode buffers, `Access` callbacks, and `ToString()` — this can't verify wipe *timing* precisely without device-level memory tooling, but it does catch a Mono-specific regression before a user does.
 5. File a GitHub issue for anything observed, even if it doesn't block the release — the point is to keep this a *tracked* coverage gap, not a silent one.
 

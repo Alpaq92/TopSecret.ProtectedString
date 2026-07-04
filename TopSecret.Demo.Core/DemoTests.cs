@@ -8,9 +8,9 @@ namespace TopSecret.Demo;
 /// the demo runs live via the reflection-based <see cref="DemoTestRunner"/>.
 /// Tests that cannot run in the current environment call
 /// <see cref="Assert.Ignore(string)"/> so they surface as SKIP rather than
-/// FAIL — e.g. Argon2id on the single-threaded WASM runtime, or the
-/// hardware-backed tier where no secure element is present. Inputs come from
-/// <see cref="DemoInputs"/>, so every run exercises fresh random values.
+/// FAIL — e.g. the hardware-backed tier where no secure element is present.
+/// Inputs come from <see cref="DemoInputs"/>, so every run exercises fresh
+/// random values.
 /// </summary>
 /// <remarks>
 /// This is deliberately a small smoke slice; the exhaustive suites
@@ -96,24 +96,13 @@ public class DemoTests
     [Test]
     public void Argon2id_verifies_the_right_credential()
     {
-        // Argon2id is deliberately unsupported on the single-threaded WASM
-        // runtime (the library fails fast with PlatformNotSupportedException;
-        // an async wrapper was evaluated and rejected on security grounds —
-        // see the README's browser-wasm section). Self-skip there, run
-        // everywhere else.
+        // Runs everywhere, including the single-threaded WASM runtime: at
+        // the library's default parallelism of 1, the KDF never touches the
+        // thread pool.
         string credential = DemoInputs.RandomSecret();
         var salt = RandomNumberGenerator.GetBytes(16);
-        byte[] stored;
-        try
-        {
-            using var secret = new ProtectedString(credential.AsSpan());
-            stored = secret.ComputeArgon2idHash(salt);
-        }
-        catch (PlatformNotSupportedException)
-        {
-            Assert.Ignore("Argon2id is not supported on this host (browser/WASM) — hash server-side.");
-            return;
-        }
+        using var secret = new ProtectedString(credential.AsSpan());
+        byte[] stored = secret.ComputeArgon2idHash(salt);
 
         using var right = new ProtectedString(credential.AsSpan());
         using var wrong = new ProtectedString(DemoInputs.MutateOneChar(credential).AsSpan());
