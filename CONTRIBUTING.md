@@ -49,6 +49,18 @@ A solution-wide build attempts every TFM and needs all workloads; CI builds leaf
 - `release.yml` — on every push to master, [release-please](https://github.com/googleapis/release-please) maintains a Release PR from your commit messages; when it merges (it auto-merges once checks pass), the tag + GitHub Release are created and the publish job packs all five NuGets on macos-14, pushes to NuGet.org, attaches them to the release, and redeploys the live demo.
 - `pages.yml` — deploys the browser demo to GitHub Pages (dispatched by the publish job; also manually runnable).
 
+## Before a major or security-relevant release: a manual device check
+
+No CI runner exists for real iOS/Android hardware (see [CI matrix and runner availability](README.md#ci-matrix-and-runner-availability) and the README's [mobile support](README.md#mobile-support-net100-ios--net100-android) caveats) — the cross-platform suite runs on desktop CoreCLR only, so Mono-specific behavior (POH pinning semantics, `ZeroMemory` JIT-resistance, finalizer ordering) and real Secure Enclave / Android Keystore round-trips are inferred, not observed. Setting up device-farm CI (AWS Device Farm, Firebase Test Lab, BrowserStack App Automate) for this is real ongoing cost for a project with no confirmed mobile-production consumer yet, so instead: **before tagging a major or security-relevant release**, run this one-off manual check on a borrowed or owned device (cheap, doesn't scale, but catches gross breakage):
+
+1. Build and run `TopSecret.Demo` (or a minimal test host) targeting `net10.0-ios` / `net10.0-android` and deploy to a real device — not just the simulator/emulator, which typically report `HardwareBackedAvailability.NoProviderForThisPlatform` regardless of what real hardware would say.
+2. Confirm `ProtectedString.HardwareBackedAvailability` reports the expected tier (Secure Enclave on a real iPhone, Android Keystore on a real Android device) and that a construct → `Access` → dispose round-trip through that tier succeeds.
+3. Run `ComputeArgon2idHash` / `VerifyArgon2idHash` on-device — Konscious relies on the thread pool, and mobile OS scheduling can differ from desktop.
+4. Watch for crashes or wrong output around `AppendChar` build-mode buffers, `Access` callbacks, and `ToString()` — this can't verify wipe *timing* precisely without device-level memory tooling, but it does catch a Mono-specific regression before a user does.
+5. File a GitHub issue for anything observed, even if it doesn't block the release — the point is to keep this a *tracked* coverage gap, not a silent one.
+
+This is deliberately lightweight, not a substitute for device-farm CI — if you're shipping this library to mobile in production yourself, still run the fuller device-farm check described in the README before relying on its in-process secrecy claims there.
+
 ## Commit messages (they drive releases)
 
 Use **[Conventional Commits](https://www.conventionalcommits.org/)** — release-please derives the version and the changelog from them:
