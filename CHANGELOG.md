@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.1.1](https://github.com/Alpaq92/TopSecret.ProtectedString/compare/v0.1.0...v0.1.1) (2026-07-04)
+
+
+### Bug Fixes
+
+* **ci:** never cancel an in-flight Pages deployment ([ab9c243](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/ab9c243bfdd03ce8aedb2e9d2262488ef56d89c6))
+
+
+### Documentation
+
+* **nuget:** lengthen the suite intro (API tokens, cryptographic, swap file) ([969e0c9](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/969e0c9f1eb5d4bb99d89e6015f8538c305ae926))
+* Release workflow badge, matching Fluid.Avalonia ([2c54084](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/2c54084e2f57b0969279faa65b3696f92a898e8c))
+
 ## 0.1.0 (2026-07-04)
 
 
