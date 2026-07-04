@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.0.1](https://github.com/Alpaq92/TopSecret.ProtectedString/compare/v1.0.0...v1.0.1) (2026-07-04)
+
+
+### Bug Fixes
+
+* **deps:** update all outdated packages — Argon2 fork to 2.1.6, Roslyn to 5.6.0 ([88240cf](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/88240cf953264bd54ce998de386dd6e15d646c56))
+
+
+### Documentation
+
+* fix stale Demo section claim that Argon2id skips in the browser ([5f2a36c](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/5f2a36c7d1a73a2032fb19c4afe6a7a0c28c969f))
+
 ## [1.0.0](https://github.com/Alpaq92/TopSecret.ProtectedString/compare/v0.1.2...v1.0.0) (2026-07-04)
 
 
