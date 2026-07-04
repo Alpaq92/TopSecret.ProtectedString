@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.1.0 (2026-07-04)
+
+
+### Features
+
+* Bump the nuget-minor-and-patch group with 3 updates ([1f4538a](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/1f4538ad1e56ce9147c5b7bf32c6f5825eeed19e))
+* Bump the nuget-minor-and-patch group with 3 updates ([017c553](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/017c553779e4a4c3955372426426067618babe7d))
+* **demo:** fresh random inputs every run; async-aware test runner ([610819b](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/610819b8029fd1c4823e6d8e4e17c90ed26664d6))
+* **demo:** run Argon2 in the browser at p=1; lengthen intro; run-again status text ([dbc97aa](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/dbc97aa392d174e03bd83a390a9a8e0e86e24e0b))
+* live NUnit test run in the demo; line-by-line output; metric + UX fixes ([a8052d8](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/a8052d8cef1c763fe00dd8b07cb0abdd93d0ff1a))
+* ProtectedString and ProtectedBlob — encrypted in-memory secrets for .NET ([830ab1d](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/830ab1df224714eb7bebc73d729fdfa9cd5e0967))
+
+
+### Bug Fixes
+
+* **argon2:** fail fast on the browser instead of wedging inside the KDF ([20949e1](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/20949e169b5204960bc505186a6ddffeda4aca17))
+* CI restore across TFMs, wasm demo run-again, larger demo blob ([597e5bd](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/597e5bd2d8c90b6f331e0ed84e21424ddbe07d61))
+* **ci:** unhang the ubuntu leg — drive swtpm in linuxTrm raw mode ([077ad45](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/077ad45077588114d5fc3484b6342e9e964c0b2b))
+* **demo:** Run again shows immediate status, no blank, no delay ([c004cae](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/c004caef268519752020a5f9dfa2449ea533e5a8))
+* **deps:** Bump actions/checkout from 4 to 7 ([3cba776](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/3cba776116f61c0434a9d15b06638ed3403a0fe4))
+* **deps:** Bump actions/checkout from 4 to 7 ([b426b48](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/b426b48a486d58d01720ebf781f13d7f6fffd0b9))
+* **deps:** Bump actions/deploy-pages from 4 to 5 ([48a80c4](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/48a80c4755a97cefd50c1eb2fa1b4fe99e1d580d))
+* **deps:** Bump actions/deploy-pages from 4 to 5 ([bede632](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/bede6328505cfcd46d0afc5f288e140cd48acf75))
+* **deps:** Bump actions/setup-dotnet from 4 to 5 ([5916d5b](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/5916d5b213537cedb746180502a4909e3c0a76ce))
+* **deps:** Bump actions/setup-dotnet from 4 to 5 ([a77452b](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/a77452bc37a7b77622dd61a03f38b105c9090db6))
+* **deps:** Bump actions/upload-pages-artifact from 3 to 5 ([649baa3](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/649baa323c30d255a385a10f4fe9373f8229e4c1))
+* **deps:** Bump actions/upload-pages-artifact from 3 to 5 ([a7f3a4c](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/a7f3a4cb7a65dc1b30f5a115081d68af16ce4fc4))
+* **deps:** Bump dependabot/fetch-metadata from 2 to 3 ([4e01fd4](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/4e01fd47d975203c108c761596eac4035c7d743c))
+* **deps:** Bump dependabot/fetch-metadata from 2 to 3 ([09bd445](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/09bd44536cac011a6642ee4f2914faf343024495))
+* green CI, working Run-again, Pages registration, 0.1.0 bootstrap ([127e77d](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/127e77deabc8c860bada8f7cbaebf824add17261))
+* revert stray Roslyn bump, scope Pages restore, harden dependabot ([a9e00a8](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/a9e00a8482fe3c9dfeb286af7755aab5620fbd52))
+
+
+### Documentation
+
+* badges in one flowing row, no forced line breaks ([0c8bf85](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/0c8bf8563e25df29d0c481e3c4170ec6676d34a4))
+* HTML badge tags (deterministic render), drop blank lines in header ([8d86020](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/8d86020d029ee6ab2b034b9be18666a2ed85eb12))
+* left-align the live-demo call-to-action, lengthen it ([fcc13e9](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/fcc13e957855a92334a0240f3a41466ecaf3f03c))
+* MIT-only LICENSE for auto-detection; full-height demo terminal ([0324cc3](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/0324cc377dd226de30294bde919af8b6bca6f289))
+* shared NuGet readme for all five packages; honest Argon2 browser status ([5be18af](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/5be18af9a4717fe8bf33e8551d1ac697e76f3e17))
+* spacing below badges; demo(wasm): autoscroll xterm as output streams ([978b80f](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/978b80feb9142065106234eb6ce492e3f9f8a8b4))
+
+## Changelog
+
 <!--
 This file is maintained automatically by release-please
 (.github/workflows/release.yml): each release lands at the top as
