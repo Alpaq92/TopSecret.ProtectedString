@@ -1058,6 +1058,11 @@ References used while auditing this implementation. Everything beyond *"this enc
 - [dotnet/runtime #27146 — *A new GC API for large array allocation*](https://github.com/dotnet/runtime/issues/27146) — design discussion behind `GC.AllocateArray<>(pinned: true)` and the pinned object heap.
 - [`GC.AllocateArray<T>(Int32, Boolean)` — Microsoft Learn](https://learn.microsoft.com/en-us/dotnet/api/system.gc.allocatearray) — reference docs.
 
+### Memory locking (`mlock`) on unsupported platforms
+
+- [libsodium — `sodium_mlock` / `sodium_munlock` (`src/libsodium/sodium/utils.c`)](https://github.com/jedisct1/libsodium/blob/master/src/libsodium/sodium/utils.c) — the most mature, widely-audited library with this exact primitive hits the identical wall on a platform with neither `mlock` nor `VirtualLock` (Emscripten/WASM included): it returns `-1` / `ENOSYS` rather than silently no-opping into "success." `MemoryLocker.TryLock` returning `false` on `net10.0-browser` is the same fail-closed shape, not an improvised shortcut — see [`browser-wasm` support](#browser-wasm-support).
+- [WebAssembly/WASI](https://github.com/WebAssembly/WASI) — the WebAssembly System Interface (for non-browser WASM hosts) has no `mlock`/`madvise`-equivalent proposal; moot for `net10.0-browser` anyway, since that TFM runs inside an actual browser JS engine, not a WASI host.
+
 ### AES-GCM, its strengths, and its sharp edges
 
 - [Scott Brady — *Authenticated Encryption in .NET with AES-GCM*](https://www.scottbrady.io/c-sharp/aes-gcm-dotnet) — practical guide to using `AesGcm` correctly in .NET.
