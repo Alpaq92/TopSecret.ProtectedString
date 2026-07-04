@@ -1,5 +1,21 @@
 # Changelog
 
+## [2.0.0](https://github.com/Alpaq92/TopSecret.ProtectedString/compare/v1.1.0...v2.0.0) (2026-07-04)
+
+
+### ⚠ BREAKING CHANGES
+
+* **security:** KeyAtRestProtectorFactory now performs a destructive (generate-and-discard) availability probe on Android the first time KeyAtRestProtection.HardwareBackedRequired or HardwareBackedPreferred is used and no external provider is registered, mirroring the existing Apple behavior. Also, protectors built under earlier 1.x releases wrapped their master key under a single fixed Keystore alias; that alias is now superseded (swept on next construction) and no attempt is made to migrate a key wrapped under it — restart any long-lived process holding a 1.x Android hardware-tier protector across the upgrade.
+
+### Features
+
+* **security:** fix Android Keystore rotation bug, harden SEP key generation ([f95219c](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/f95219c7c21475ea10c9b788b75f681844592337))
+
+
+### Bug Fixes
+
+* **demo:** paint the first loading dot immediately, tighten cadence to 150ms ([9b3d11c](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/9b3d11cfc47d5add3a7fb94af652a9cafff74cc7))
+
 ## [1.1.0](https://github.com/Alpaq92/TopSecret.ProtectedString/compare/v1.0.1...v1.1.0) (2026-07-04)
 
 
