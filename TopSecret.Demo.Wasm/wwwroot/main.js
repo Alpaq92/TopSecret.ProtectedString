@@ -75,13 +75,19 @@ term.open(terminalEl);
 // can't leave a stray character from a longer one uncleared. Runs only
 // while the boot is the only thing on screen; stopped the instant
 // dotnet.create() resolves, before any real demo output starts.
+//
+// The first frame paints immediately (not on the first timer tick) and the
+// cadence is short (150ms): on a warm cache the whole boot can finish in
+// well under a second, and waiting a full tick for the very first dot meant
+// a fast load could show bare, unanimated text the entire time.
 const LOADING_TEXT = 'Loading .NET WebAssembly runtime';
 let loadingDots = 0;
-term.write(LOADING_TEXT);
-const loadingAnimation = setInterval(() => {
+const paintLoadingFrame = () => {
     loadingDots = (loadingDots % 3) + 1;
     term.write('\r' + LOADING_TEXT + '.'.repeat(loadingDots) + ' '.repeat(3 - loadingDots));
-}, 400);
+};
+paintLoadingFrame();
+const loadingAnimation = setInterval(paintLoadingFrame, 150);
 const refit = () => {
     if (terminalEl.clientHeight > 0 && terminalEl.clientWidth > 0) {
         try { fitAddon.fit(); } catch { /* ignore transient sizing errors */ }
