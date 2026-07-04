@@ -1,5 +1,27 @@
 # Changelog
 
+## [1.0.0](https://github.com/Alpaq92/TopSecret.ProtectedString/compare/v0.1.2...v1.0.0) (2026-07-04)
+
+
+### ⚠ BREAKING CHANGES
+
+* **argon2:** ComputeArgon2idHash / VerifyArgon2idHash no longer throw PlatformNotSupportedException on net10.0-browser at the default DegreeOfParallelism = 1 — they now complete successfully. Callers that were catching PlatformNotSupportedException specifically to detect "running in the browser" for this API will no longer see it for the default case; DegreeOfParallelism > 1 still throws on a single-threaded host.
+
+### Features
+
+* **argon2:** switch to TopSecret.Cryptography.Argon2 — Argon2id now runs in the browser ([91f8b10](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/91f8b102ae0bd2f1f30b37395d4d3602acac2fbd))
+
+
+### Bug Fixes
+
+* **browser:** shrink BouncyCastle's key-material reclaim window ([e74358d](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/e74358ddf6064e0c468c9c69afc83203669993c4))
+
+
+### Documentation
+
+* cite libsodium's identical mlock fallback in References ([fd1f7c0](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/fd1f7c08452d7734b7e8520c027689260b2a199d))
+* manual device-check policy; honest swap/BC-residue wording ([f35b4d5](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/f35b4d5e5671d7baa2bdadb578ad1fb04953580e))
+
 ## [0.1.2](https://github.com/Alpaq92/TopSecret.ProtectedString/compare/v0.1.1...v0.1.2) (2026-07-04)
 
 
