@@ -22,9 +22,15 @@ permissions:
   pages: write
   id-token: write
 
+# cancel-in-progress deliberately FALSE (matching GitHub's Pages starter
+# workflows): cancelling an actions/deploy-pages deployment mid-flight leaves
+# the Pages pipeline in a state where the NEXT deployment fails with
+# "Deployment failed, try again later" — observed when two pushes landed 60s
+# apart. With false, new runs queue behind the in-flight one; the queued run
+# still deploys the newest commit.
 concurrency:
   group: github-pages
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   deploy:
