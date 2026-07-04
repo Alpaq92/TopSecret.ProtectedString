@@ -7,6 +7,7 @@
 <a href="https://www.nuget.org/packages/TopSecret.ProtectedString.Configuration"><img alt="NuGet: .Configuration" src="https://img.shields.io/nuget/v/TopSecret.ProtectedString.Configuration.svg?label=.Configuration"></a>
 <a href="https://www.nuget.org/packages/TopSecret.ProtectedBlob"><img alt="NuGet: TopSecret.ProtectedBlob" src="https://img.shields.io/nuget/v/TopSecret.ProtectedBlob.svg?label=TopSecret.ProtectedBlob"></a>
 <a href="https://github.com/Alpaq92/TopSecret.ProtectedString/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/Alpaq92/TopSecret.ProtectedString/ci.yml?branch=master&label=CI"></a>
+<a href="https://github.com/Alpaq92/TopSecret.ProtectedString/actions/workflows/release.yml"><img alt="Release" src="https://img.shields.io/github/actions/workflow/status/Alpaq92/TopSecret.ProtectedString/release.yml?branch=master&label=Release"></a>
 <a href="https://alpaq92.github.io/TopSecret.ProtectedString/"><img alt="Live demo" src="https://img.shields.io/badge/demo-GitHub%20Pages-2ea44f"></a>
 <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-blue.svg"></a>
 </div>
