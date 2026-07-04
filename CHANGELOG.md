@@ -5,7 +5,7 @@
 
 ### ⚠ BREAKING CHANGES
 
-* **argon2:** ComputeArgon2idHash / VerifyArgon2idHash no longer throw PlatformNotSupportedException on net10.0-browser at the default DegreeOfParallelism = 1 — they now complete successfully. Callers that were catching PlatformNotSupportedException specifically to detect "running in the browser" for this API will no longer see it for the default case; DegreeOfParallelism > 1 still throws on a single-threaded host.
+* **argon2:** ComputeArgon2idHash / VerifyArgon2idHash no longer throw PlatformNotSupportedException on net10.0-browser at the default DegreeOfParallelism = 1 — they now complete successfully. Callers that were catching PlatformNotSupportedException specifically to detect "running in the browser" for this API will no longer see it for the default case; calls with DegreeOfParallelism > 1 still throw on a single-threaded host.
 
 ### Features
 
