@@ -18,8 +18,10 @@ updates:
         # Keep the Roslyn packages OUT of the group: a grouped bump can carry
         # a package past an individual `ignore` rule, which is how
         # Microsoft.CodeAnalysis.CSharp once slipped from 5.3.0 to 5.6.0 and
-        # broke the SDK-floor pin (CS1705 / CS9057). Excluded here AND ignored
-        # below — belt and suspenders.
+        # broke the SDK-floor pin (CS1705 / CS9057) before that exact pin was
+        # deliberately adopted (with a matching global.json floor bump,
+        # verified) on 2026-07-04. Excluded here AND ignored below — belt
+        # and suspenders.
         exclude-patterns:
           - "Microsoft.CodeAnalysis*"
         update-types:
@@ -29,20 +31,20 @@ updates:
       # `Microsoft.CodeAnalysis.CSharp` is locked to a major.minor pin
       # because bumping it implies bumping the SDK floor in `global.json`,
       # which is a consumer-breaking change for anyone building against
-      # this package on an older SDK. Current pin: 5.3.0, requires
-      # `Microsoft.CodeAnalysis` compiler 5.3+ which ships in .NET SDK
-      # 10.0.200+. Patch bumps inside 5.3.x still propose PRs; minor
-      # and major bumps must be a deliberate maintainer choice with a
-      # matching `global.json` floor change. See "Maintainer notes —
-      # version pins worth knowing" in README.md.
+      # this package on an older SDK. Current pin: 5.6.0 (bumped
+      # 2026-07-04 from 5.3.0, with a verified matching global.json floor
+      # bump to 10.0.300 — see "Maintainer notes — version pins worth
+      # knowing" in README.md). Patch bumps inside 5.6.x still propose
+      # PRs; minor and major bumps must be a deliberate maintainer choice
+      # with a matching, verified `global.json` floor change.
       - dependency-name: "Microsoft.CodeAnalysis.CSharp"
         update-types:
           - "version-update:semver-minor"
           - "version-update:semver-major"
-      # Analyzers tracks CSharp's compiler/Roslyn version, so a minor bump
-      # can drag Microsoft.CodeAnalysis past the pinned host compiler
-      # (CS1705). Block minor and major; patch bumps inside the line still
-      # propose PRs.
+      # Analyzers tracks CSharp's compiler/Roslyn version (currently 5.6.0,
+      # see above), so a minor bump can drag Microsoft.CodeAnalysis past
+      # the pinned host compiler (CS1705 / CS9057). Block minor and major;
+      # patch bumps inside the line still propose PRs.
       - dependency-name: "Microsoft.CodeAnalysis.Analyzers"
         update-types:
           - "version-update:semver-minor"

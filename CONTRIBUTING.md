@@ -4,7 +4,7 @@ Thanks for your interest! This document covers what you need to build, test, and
 
 ## Prerequisites
 
-- **.NET SDK 10.0.200 or newer** — enforced by `global.json` (`rollForward: latestFeature`). The floor exists because the Roslyn analyzer references `Microsoft.CodeAnalysis.CSharp` 5.3.0, which needs the compiler that ships in SDK 10.0.200+. **Do not bump the Roslyn package** without reading the maintainer notes in the README — it is consumer-breaking and Dependabot is configured to leave it alone.
+- **.NET SDK 10.0.300 or newer** — enforced by `global.json` (`rollForward: latestFeature`). The floor exists because the Roslyn analyzer references `Microsoft.CodeAnalysis.CSharp` 5.6.0, which needs a matching compiler — that ships in SDK 10.0.300+. **Do not bump the Roslyn package** without reading the maintainer notes in the README — it is consumer-breaking and Dependabot is configured to leave it alone.
 - Building the platform TFMs (`net10.0-android/-ios/-macos/-maccatalyst/-browser`) additionally requires workloads: `dotnet workload restore` (or `install android ios macos maccatalyst wasm-tools`). Day-to-day development only needs plain `net10.0` — build individual projects rather than the solution if you don't have the workloads.
 
 ## Build, test, run

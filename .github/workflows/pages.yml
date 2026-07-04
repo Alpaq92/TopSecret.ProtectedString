@@ -43,7 +43,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
-      # Honours global.json (SDK floor 10.0.200, rollForward latestFeature).
+      # Honours global.json (SDK floor 10.0.300, rollForward latestFeature).
       - name: Setup .NET
         uses: actions/setup-dotnet@v5
 

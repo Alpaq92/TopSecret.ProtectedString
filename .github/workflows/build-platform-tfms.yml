@@ -13,10 +13,10 @@ name: Build platform-specific TFMs
 # after a refactor that touches the AesGcmShim or any TFM-conditional
 # code path).
 #
-# All three jobs honour `global.json`'s SDK 10.0.200 floor via the
+# All three jobs honour `global.json`'s SDK 10.0.300 floor via the
 # default setup-dotnet@v4 behaviour (no explicit version arg). The
 # floor exists because the analyzer references Microsoft.CodeAnalysis.CSharp
-# 5.3.0; see `Maintainer notes — version pins worth knowing` in
+# 5.6.0; see `Maintainer notes — version pins worth knowing` in
 # README.md for the full rationale.
 on:
   workflow_dispatch:
