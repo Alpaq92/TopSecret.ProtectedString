@@ -279,11 +279,16 @@ public static class KeyAtRestProtectorFactory
     /// cached probe (<see cref="AppleSecKeyProtector.IsActuallyAvailable"/>)
     /// so that <c>iOS Simulator on x86_64</c> and pre-T1 Intel Macs report
     /// <see langword="false"/>. On Android (the <c>net10.0-android</c> TFM),
-    /// returns <see langword="true"/> for the built-in Keystore. Otherwise,
-    /// returns <see langword="true"/> if any registered provider's
-    /// availability probe returns <see langword="true"/>, or — if the
-    /// provider registered without a probe — if any registration exists at
-    /// all. Returns <see langword="false"/> when nothing claims availability.
+    /// the built-in is likewise consulted via a destructive but cached probe
+    /// (<c>AndroidKeystoreProtector.IsActuallyAvailable</c>), so that
+    /// emulators and hardware-less devices — where the Keystore silently
+    /// hands back a software-level key — report <see langword="false"/>
+    /// instead of a value <see cref="KeyAtRestProtectorFactory.Create"/>
+    /// would then contradict. Otherwise, returns <see langword="true"/> if
+    /// any registered provider's availability probe returns
+    /// <see langword="true"/>, or — if the provider registered without a
+    /// probe — if any registration exists at all. Returns
+    /// <see langword="false"/> when nothing claims availability.
     /// </remarks>
     internal static bool IsHardwareBackedAvailableForCurrentPlatform()
     {
@@ -298,7 +303,11 @@ public static class KeyAtRestProtectorFactory
 #if ANDROID
         if (OperatingSystem.IsAndroid())
         {
-            return true;
+            // Destructive (generate-and-discard) probe with a process-lifetime
+            // cache, mirroring the Apple path — emulators and hardware-less
+            // devices report false instead of a value construction would
+            // then contradict via the residency check in CreateOrThrow.
+            return AndroidKeystoreProtector.IsActuallyAvailable();
         }
 #endif
 

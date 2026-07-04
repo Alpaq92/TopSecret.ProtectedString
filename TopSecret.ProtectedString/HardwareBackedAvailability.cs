@@ -34,10 +34,13 @@ public enum HardwareBackedAvailability
 {
     /// <summary>
     /// At least one hardware-backed provider claims to be available on this
-    /// host. Apple platforms always report this; Android (on the
-    /// <c>net10.0-android</c> TFM) always reports this; Windows and Linux
-    /// report this only when an external provider has been registered (e.g.
-    /// the <c>TopSecret.ProtectedString.WindowsTpm</c> or
+    /// host. Apple platforms and Android (on the <c>net10.0-android</c> TFM)
+    /// both report this via a destructive-but-cached probe that generates
+    /// and discards a real key to verify the secure hardware is actually
+    /// present and hardware-resident — not merely that the built-in
+    /// provider ships in the assembly. Windows and Linux report this only
+    /// when an external provider has been registered (e.g. the
+    /// <c>TopSecret.ProtectedString.WindowsTpm</c> or
     /// <c>TopSecret.ProtectedString.LinuxTpm</c> NuGets for TPM 2.0).
     /// </summary>
     Available,

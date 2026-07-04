@@ -410,7 +410,7 @@ The demo exercises every public-facing pattern:
 - The logging-safe `ToString()` — `ProtectedString[length=N]`, never the plaintext.
 - The interop recipes from [Interop with string-only APIs](#interop-with-string-only-apis): custom `HttpContent` driving `WriteUtf8To`, and a `DelegatingHandler` that materializes a Bearer token inside `Access` for one send and lets the string die with the request. Both run against an in-process `HttpMessageHandler` so the demo is fully offline.
 
-It also opts into `KeyAtRestProtection.HardwareBackedPreferred` at startup so the hardware-backed availability probe runs on the host — on Apple Silicon, Windows-with-TPM, or Android-on-device this picks up the secure element; on other hosts it falls back silently down the [tier order](#key-at-rest-wrapping-opt-in-tiered).
+It also opts into `KeyAtRestProtection.HardwareBackedPreferred` at startup so the hardware-backed availability probe runs on the host — on Apple Silicon, Windows-with-TPM, or Android-on-device this picks up the platform's secure hardware (SEP / TPM / Keystore TEE); on other hosts it falls back silently down the [tier order](#key-at-rest-wrapping-opt-in-tiered).
 
 ## API surface
 
@@ -466,7 +466,7 @@ Windows is the only platform where `SecureString` actually encrypts, so it's als
 
 **The steelman for `SecureString`.** Its strongest defense is provenance: it is part of the framework, two decades in production, with Microsoft's own audit history. A familiar, well-bounded primitive can prove safer than a newer, theoretically stronger one that has not endured comparable adversarial scrutiny.
 
-**Why `ProtectedString` still wins.** The cryptographic gap is in the table — AES-GCM-256 over the contents on every platform, with the master-key wrap on Windows under a per-protector random key (no fixed system-wide key for an attacker to reproduce, unlike `CryptProtectMemory`'s in-process-reversible construction). The argument that *isn't* in the table closes the question: Microsoft itself ships a "don't use this for new code" page, which neutralises the "trust the mature thing" defence. And TPM wrap (via [`TopSecret.ProtectedString.WindowsTpm`](TopSecret.ProtectedString.WindowsTpm)) puts the wrap key in the secure element instead of process memory — the only mechanism in either library that meaningfully raises the bar against an in-process attacker on Windows. `SecureString` has no equivalent.
+**Why `ProtectedString` still wins.** The cryptographic gap is in the table — AES-GCM-256 over the contents on every platform, with the master-key wrap on Windows under a per-protector random key (no fixed system-wide key for an attacker to reproduce, unlike `CryptProtectMemory`'s in-process-reversible construction). The argument that *isn't* in the table closes the question: Microsoft itself ships a "don't use this for new code" page, which neutralises the "trust the mature thing" defence. And TPM wrap (via [`TopSecret.ProtectedString.WindowsTpm`](TopSecret.ProtectedString.WindowsTpm)) puts the wrap key in the TPM instead of process memory — the only mechanism in either library that meaningfully raises the bar against an in-process attacker on Windows. `SecureString` has no equivalent.
 
 **When `SecureString` is still the right pick.** Legacy code where it's woven into a Win32 interop boundary that expects it (`PSCredential`, `RunAs`, ADSI / WMI), the surface is stable, and the migration cost isn't justified by the threat model. For new code: `ProtectedString`, even on Windows, even before turning on TPM wrap.
 
@@ -560,21 +560,23 @@ The option has four values:
 | `HardwareBackedRequired` | Hardware-resident wrap key only — **fails closed** with `PlatformNotSupportedException` at the first `ProtectedString` construction if no hardware-backed provider is available on this host (see above). | ~ms — varies by provider, see [Performance](#hardware-backed-tier) |
 | `HardwareBackedPreferred` | Best effort: try hardware → fall back to obscurity → fall back to no-op silently. The recommended setting when you want whatever protection the platform offers without hard failures. | Whatever the active tier costs |
 
-Use `ProtectedString.HardwareBackedAvailability` in your composition root to branch deliberately. On Apple hosts the probe is destructive on first call (generates and discards a SEP-resident EC key) but cached for the process lifetime — see [Apple SEP availability](#apple-sep-availability) for which hosts have a Secure Enclave at all. On other platforms the probe inspects the registered providers without touching the secure element.
+Use `ProtectedString.HardwareBackedAvailability` in your composition root to branch deliberately. On Apple hosts the probe is destructive on first call (generates and discards a SEP-resident EC key) but cached for the process lifetime — see [Apple SEP availability](#apple-sep-availability) for which hosts have a Secure Enclave at all. On other platforms the probe inspects the registered providers without touching the secure hardware.
 
 #### Per-platform wrapping primitives
 
 | Platform | Hardware tier (built-in) | Hardware tier (optional package) | Obscurity tier |
 | --- | --- | --- | --- |
-| macOS / iOS / Mac Catalyst | Apple Secure Enclave EC P-256 + ECIES-AES-GCM | — | HKDF stream-XOR |
-| Android (API 23+) | `AndroidKeyStore`-resident AES-GCM-256 via JNI (TEE; **not** StrongBox), on the `net10.0-android` TFM | — | HKDF stream-XOR |
+| macOS / iOS / Mac Catalyst | Apple Secure Enclave EC P-256 + ECIES-AES-GCM (`CofactorVariableIVX963SHA256AESGCM` — Apple's recommended variable-IV variant), generated with a no-prompt `privateKeyUsage` access control | — | HKDF stream-XOR |
+| Android (API 23+) | `AndroidKeyStore`-resident AES-GCM-256 via JNI, **hardware residency verified at key generation** — the Keystore silently degrades to a software implementation on emulators and hardware-less devices, so the provider introspects the generated key (`KeyInfo.getSecurityLevel()` on API 31+, `isInsideSecureHardware()` before that) and rejects software-level keys, falling back per the tier policy. TEE by default; **not** StrongBox. On the `net10.0-android` TFM. | — | HKDF stream-XOR |
 | Windows | — | **TPM 2.0 via NCrypt** + Microsoft Platform Crypto Provider (RSA-2048 OAEP-SHA256), shipped in [`TopSecret.ProtectedString.WindowsTpm`](TopSecret.ProtectedString.WindowsTpm). Auto-registers via `[ModuleInitializer]`. | AES-GCM-256 with a per-protector random wrap key. |
 | Linux | — | **TPM 2.0 via Microsoft TSS.MSR** (RSA-2048 OAEP-SHA256 against `/dev/tpmrm0`), shipped in [`TopSecret.ProtectedString.LinuxTpm`](TopSecret.ProtectedString.LinuxTpm). Auto-registers via `[ModuleInitializer]`. | HKDF stream-XOR |
 | Browser WebAssembly | — | — (no SEP / Keystore / TPM in the WASM sandbox) | HKDF stream-XOR. AES-GCM itself uses BouncyCastle on this TFM since `System.Security.Cryptography.AesGcm.IsSupported` is `false` — see [`browser-wasm` support](#browser-wasm-support). |
 
+What the hardware tier does — and does not — claim: the wrap key is generated inside and never leaves the secure hardware, so the *wrapping* secret is absent from the app process entirely; a passive process-memory dump taken while no crypto operation is in flight, and while no [`UnwrappedKeyCacheTtl`](#hot-reload-semantics) cache is warm, recovers only wrapped ciphertext. During any `Access` / `Equals` / `AppendChar` / `Copy` call, and for the full TTL window when a cache is configured, the *unwrapped* 32-byte master is materialized in ordinary (pinned/locked, but not hardware-backed) process memory like on every other tier — the hardware tier narrows the window an attacker must catch the key in, it does not eliminate it. It does **not** claim the secure hardware itself is unbreakable, either — real extractions of TEE-held keys have shipped in production devices (e.g. the Samsung Keymaster downgrade family, [CVE-2021-25444](https://nvd.nist.gov/vuln/detail/CVE-2021-25444)), which is also why the Android provider lets the Keystore generate the GCM IV instead of supplying its own.
+
 ##### Apple SEP availability
 
-The Apple built-in ships in the main package, but the Secure Enclave itself is present only on Apple Silicon (M1+), T2 Macs (most 2018–2020), and T1 Macs (2016–2017 Touch Bar MBP, slower). It is **absent** on pre-T1 Intel Macs and the x86_64 iOS Simulator — SEP-bound key generation returns `NULL` there. Under `HardwareBackedRequired`, those hosts get a clean `PlatformNotSupportedException`; under `HardwareBackedPreferred` they fall through to obscurity.
+The Apple built-in ships in the main package, but the Secure Enclave itself is present only on Apple Silicon (M1+), T2 Macs (most 2018–2020), and T1 Macs (2016–2017 Touch Bar MBP, slower). It is **absent** on pre-T1 Intel Macs and the iOS Simulator on Intel hosts (simulators running on Apple-Silicon hosts do expose a SEP) — SEP-bound key generation returns `NULL` where it's missing. Under `HardwareBackedRequired`, those hosts get a clean `PlatformNotSupportedException`; under `HardwareBackedPreferred` they fall through to obscurity.
 
 ##### Windows TPM (optional package)
 

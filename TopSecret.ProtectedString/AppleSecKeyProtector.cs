@@ -6,12 +6,27 @@ namespace TopSecret;
 /// <summary>
 /// Wraps the per-process AES master key with an EC P-256 key generated inside
 /// the Apple Secure Enclave (<c>kSecAttrTokenIDSecureEnclave</c>) using
-/// ECIES-AES-GCM (<c>kSecKeyAlgorithmECIESEncryptionStandardX963SHA256AESGCM</c>).
-/// The SEP-resident private key never enters process memory; only its
-/// reference (<c>SecKeyRef</c>) and the wrapped ciphertext blob are held in
-/// the .NET heap.
+/// ECIES-AES-GCM (<c>kSecKeyAlgorithmECIESEncryptionCofactorVariableIVX963SHA256AESGCM</c>
+/// — the variable-IV variant Apple recommends; the older fixed-IV forms are
+/// documented as legacy in <c>SecKey.h</c>). The SEP-resident private key
+/// never enters process memory; only its reference (<c>SecKeyRef</c>) and
+/// the wrapped ciphertext blob are held in the .NET heap.
 /// </summary>
 /// <remarks>
+/// <para>
+/// The key is generated with a <c>SecAccessControl</c> of
+/// <c>kSecAccessControlPrivateKeyUsage</c> +
+/// <c>kSecAttrAccessibleAlwaysThisDeviceOnly</c> — the access control Apple
+/// documents for SEP private-key operations, with an accessibility class
+/// that carries no unlock-state requirement. <c>privateKeyUsage</c> adds no
+/// user prompts (no biometric/PIN flags). The key is never persisted
+/// (<c>kSecAttrIsPermanent: false</c> — it lives only in process memory and
+/// dies with the process), so none of the data-at-rest accessibility classes
+/// apply; <c>AfterFirstUnlock</c> in particular would make SEP key generation
+/// fail for any process that runs before the device's first unlock since
+/// boot (background app launches, VoIP/push wake-ups), which this library
+/// has no reason to require.
+/// </para>
 /// <para>
 /// Each call to <see cref="UnwrapKey"/> performs a SEP roundtrip via
 /// <c>SecKeyCreateDecryptedData</c>. Per-op latency is platform-dependent —
@@ -21,9 +36,14 @@ namespace TopSecret;
 /// on dispose.
 /// </para>
 /// <para>
-/// Falls back via <see cref="HardeningPolicy"/> when SEP is not available
-/// — typically iOS Simulator on x86_64, very old macOS hardware, or any
-/// non-Apple platform.
+/// When SEP is not available — typically the iOS Simulator on Intel hosts
+/// (simulators on Apple-Silicon hosts do expose a SEP), pre-T1 Intel Macs, or
+/// any non-Apple platform — <see cref="TryCreate"/> returns
+/// <see langword="null"/> and <see cref="KeyAtRestProtectorFactory"/> falls
+/// back to the next tier (obscurity, then no-op) per the configured
+/// <see cref="KeyAtRestProtection"/> policy; <see cref="HardeningPolicy"/>
+/// only governs failures within a tier (e.g. a memory-locking failure), not
+/// the hardware-to-obscurity fallback itself.
 /// </para>
 /// </remarks>
 internal sealed class AppleSecKeyProtector : KeyAtRestProtector, IDisposable
@@ -43,8 +63,8 @@ internal sealed class AppleSecKeyProtector : KeyAtRestProtector, IDisposable
     /// SEP-resident P-256 key. On success the master array is zeroed in place
     /// and ownership transfers to the returned protector. Returns
     /// <see langword="null"/> on any failure (SEP unavailable, framework load
-    /// failure, ECIES error) so the caller can fall back via the
-    /// <see cref="HardeningPolicy"/>.
+    /// failure, ECIES error) so <see cref="KeyAtRestProtectorFactory"/> can
+    /// fall back to the next tier.
     /// </summary>
     public static AppleSecKeyProtector? TryCreate(byte[] master)
     {
@@ -141,8 +161,8 @@ internal sealed class AppleSecKeyProtector : KeyAtRestProtector, IDisposable
             privateKey = Native.SecKeyCreateRandomKey(paramDict, ref error);
             if (privateKey == IntPtr.Zero)
             {
-                if (error != IntPtr.Zero) Native.CFRelease(error);
-                throw new InvalidOperationException("SecKeyCreateRandomKey failed.");
+                throw new InvalidOperationException(
+                    Native.DescribeAndReleaseError(error, "SecKeyCreateRandomKey"));
             }
 
             publicKey = Native.SecKeyCopyPublicKey(privateKey);
@@ -156,8 +176,8 @@ internal sealed class AppleSecKeyProtector : KeyAtRestProtector, IDisposable
                 publicKey, Native.AlgorithmECIES, plaintextData, ref error);
             if (encryptedData == IntPtr.Zero)
             {
-                if (error != IntPtr.Zero) Native.CFRelease(error);
-                throw new InvalidOperationException("SecKeyCreateEncryptedData failed.");
+                throw new InvalidOperationException(
+                    Native.DescribeAndReleaseError(error, "SecKeyCreateEncryptedData"));
             }
 
             byte[] wrapped = Native.CFDataCopyToManaged(encryptedData);
@@ -204,8 +224,8 @@ internal sealed class AppleSecKeyProtector : KeyAtRestProtector, IDisposable
                 _privateKeyRef, Native.AlgorithmECIES, ciphertext, ref error);
             if (decrypted == IntPtr.Zero)
             {
-                if (error != IntPtr.Zero) Native.CFRelease(error);
-                throw new InvalidOperationException("SecKeyCreateDecryptedData failed.");
+                throw new InvalidOperationException(
+                    Native.DescribeAndReleaseError(error, "SecKeyCreateDecryptedData"));
             }
 
             int len = checked((int)Native.CFDataGetLength(decrypted));
@@ -227,6 +247,10 @@ internal sealed class AppleSecKeyProtector : KeyAtRestProtector, IDisposable
                 CryptographicOperations.ZeroMemory(unwrapped);
                 MemoryLocker.TryUnlock(unwrapped);
             }
+            // Keeps `this` reachable through the SEP round-trip above, so the
+            // finalizer can never fire (releasing _privateKeyRef out from
+            // under an in-flight decrypt) while UnwrapKey is executing.
+            GC.KeepAlive(this);
         }
     }
 
@@ -257,6 +281,13 @@ internal sealed class AppleSecKeyProtector : KeyAtRestProtector, IDisposable
         // CFNumberType.kCFNumberIntType = 9.
         private const int kCFNumberIntType = 9;
 
+        // CFStringEncoding kCFStringEncodingUTF8.
+        private const uint kCFStringEncodingUTF8 = 0x08000100;
+
+        // SecAccessControlCreateFlags.privateKeyUsage — permits SEP
+        // private-key operations without any user-presence requirement.
+        private const nuint kSecAccessControlPrivateKeyUsage = 1u << 30;
+
         private static int s_loaded; // 0 = not loaded, 1 = loaded
 
         internal static IntPtr AlgorithmECIES { get; private set; }
@@ -266,6 +297,9 @@ internal sealed class AppleSecKeyProtector : KeyAtRestProtector, IDisposable
         private static IntPtr s_attrTokenID;
         private static IntPtr s_attrTokenIDSecureEnclave;
         private static IntPtr s_attrIsPermanent;
+        private static IntPtr s_attrAccessControl;
+        private static IntPtr s_privateKeyAttrs;
+        private static IntPtr s_attrAccessibleAlwaysThisDeviceOnly;
         private static IntPtr s_cfBooleanFalse;
         private static IntPtr s_cfTypeDictionaryKeyCallBacks;
         private static IntPtr s_cfTypeDictionaryValueCallBacks;
@@ -278,13 +312,19 @@ internal sealed class AppleSecKeyProtector : KeyAtRestProtector, IDisposable
             var cf = NativeLibrary.Load(CoreFoundationFramework);
 
             // CFStringRef constants — variable holds a pointer; dereference once.
-            AlgorithmECIES = ReadIntPtrSymbol(sec, "kSecKeyAlgorithmECIESEncryptionStandardX963SHA256AESGCM");
+            // The fixed-IV ECIES forms are documented as legacy in SecKey.h
+            // (they use an all-zero GCM IV); the VariableIV variant is Apple's
+            // recommended algorithm for SEP ECIES.
+            AlgorithmECIES = ReadIntPtrSymbol(sec, "kSecKeyAlgorithmECIESEncryptionCofactorVariableIVX963SHA256AESGCM");
             s_attrKeyType = ReadIntPtrSymbol(sec, "kSecAttrKeyType");
             s_attrKeyTypeECSECPrimeRandom = ReadIntPtrSymbol(sec, "kSecAttrKeyTypeECSECPrimeRandom");
             s_attrKeySizeInBits = ReadIntPtrSymbol(sec, "kSecAttrKeySizeInBits");
             s_attrTokenID = ReadIntPtrSymbol(sec, "kSecAttrTokenID");
             s_attrTokenIDSecureEnclave = ReadIntPtrSymbol(sec, "kSecAttrTokenIDSecureEnclave");
             s_attrIsPermanent = ReadIntPtrSymbol(sec, "kSecAttrIsPermanent");
+            s_attrAccessControl = ReadIntPtrSymbol(sec, "kSecAttrAccessControl");
+            s_privateKeyAttrs = ReadIntPtrSymbol(sec, "kSecPrivateKeyAttrs");
+            s_attrAccessibleAlwaysThisDeviceOnly = ReadIntPtrSymbol(sec, "kSecAttrAccessibleAlwaysThisDeviceOnly");
 
             // CFBooleanRef constants.
             s_cfBooleanFalse = ReadIntPtrSymbol(cf, "kCFBooleanFalse");
@@ -304,44 +344,110 @@ internal sealed class AppleSecKeyProtector : KeyAtRestProtector, IDisposable
             // { kSecAttrKeyType: kSecAttrKeyTypeECSECPrimeRandom,
             //   kSecAttrKeySizeInBits: 256,
             //   kSecAttrTokenID: kSecAttrTokenIDSecureEnclave,
-            //   kSecAttrIsPermanent: false }
+            //   kSecPrivateKeyAttrs: {
+            //       kSecAttrIsPermanent: false,
+            //       kSecAttrAccessControl: SecAccessControl(
+            //           kSecAttrAccessibleAlwaysThisDeviceOnly,
+            //           privateKeyUsage) } }
+            //
+            // privateKeyUsage is the access control Apple documents for SEP
+            // private-key operations; it carries no user-presence flags, so
+            // no prompt is ever shown. AlwaysThisDeviceOnly carries no
+            // unlock-state requirement either — appropriate since this key
+            // is never persisted (kSecAttrIsPermanent: false below) and so
+            // has no at-rest state for an accessibility class to protect;
+            // it also keeps key generation working for processes that start
+            // before the device's first unlock since boot.
             int keySize = 256;
-            IntPtr keySizeNumber = CFNumberCreate(IntPtr.Zero, kCFNumberIntType, ref keySize);
+            IntPtr keySizeNumber = IntPtr.Zero;
+            IntPtr accessControl = IntPtr.Zero;
+            IntPtr privateKeyAttrs = IntPtr.Zero;
             try
             {
-                var keys = new IntPtr[4];
-                keys[0] = s_attrKeyType;
-                keys[1] = s_attrKeySizeInBits;
-                keys[2] = s_attrTokenID;
-                keys[3] = s_attrIsPermanent;
+                keySizeNumber = CFNumberCreate(IntPtr.Zero, kCFNumberIntType, ref keySize);
 
-                var values = new IntPtr[4];
-                values[0] = s_attrKeyTypeECSECPrimeRandom;
-                values[1] = keySizeNumber;
-                values[2] = s_attrTokenIDSecureEnclave;
-                values[3] = s_cfBooleanFalse;
+                IntPtr aclError = IntPtr.Zero;
+                accessControl = SecAccessControlCreateWithFlags(
+                    IntPtr.Zero,
+                    s_attrAccessibleAlwaysThisDeviceOnly,
+                    kSecAccessControlPrivateKeyUsage,
+                    ref aclError);
+                if (accessControl == IntPtr.Zero)
+                {
+                    throw new InvalidOperationException(
+                        DescribeAndReleaseError(aclError, "SecAccessControlCreateWithFlags"));
+                }
 
-                var keysHandle = GCHandle.Alloc(keys, GCHandleType.Pinned);
-                var valuesHandle = GCHandle.Alloc(values, GCHandleType.Pinned);
+                privateKeyAttrs = CreateCFDictionary(
+                    [s_attrIsPermanent, s_attrAccessControl],
+                    [s_cfBooleanFalse, accessControl]);
+
+                return CreateCFDictionary(
+                    [s_attrKeyType, s_attrKeySizeInBits, s_attrTokenID, s_privateKeyAttrs],
+                    [s_attrKeyTypeECSECPrimeRandom, keySizeNumber, s_attrTokenIDSecureEnclave, privateKeyAttrs]);
+            }
+            finally
+            {
+                // CFDictionaryCreate with kCFType callbacks retains its keys
+                // and values, so our references can be dropped unconditionally.
+                if (privateKeyAttrs != IntPtr.Zero) CFRelease(privateKeyAttrs);
+                if (accessControl != IntPtr.Zero) CFRelease(accessControl);
+                if (keySizeNumber != IntPtr.Zero) CFRelease(keySizeNumber);
+            }
+        }
+
+        private static IntPtr CreateCFDictionary(IntPtr[] keys, IntPtr[] values)
+        {
+            var keysHandle = GCHandle.Alloc(keys, GCHandleType.Pinned);
+            var valuesHandle = GCHandle.Alloc(values, GCHandleType.Pinned);
+            try
+            {
+                return CFDictionaryCreate(
+                    IntPtr.Zero,
+                    Marshal.UnsafeAddrOfPinnedArrayElement(keys, 0),
+                    Marshal.UnsafeAddrOfPinnedArrayElement(values, 0),
+                    keys.Length,
+                    s_cfTypeDictionaryKeyCallBacks,
+                    s_cfTypeDictionaryValueCallBacks);
+            }
+            finally
+            {
+                keysHandle.Free();
+                valuesHandle.Free();
+            }
+        }
+
+        /// <summary>
+        /// Extracts a human-readable description from a <c>CFErrorRef</c>
+        /// (releasing it), for exception messages. Returns a generic message
+        /// when the error is NULL or its description can't be read.
+        /// </summary>
+        public static string DescribeAndReleaseError(IntPtr error, string operation)
+        {
+            if (error == IntPtr.Zero) return operation + " failed.";
+            try
+            {
+                IntPtr description = CFErrorCopyDescription(error);
+                if (description == IntPtr.Zero) return operation + " failed.";
                 try
                 {
-                    return CFDictionaryCreate(
-                        IntPtr.Zero,
-                        Marshal.UnsafeAddrOfPinnedArrayElement(keys, 0),
-                        Marshal.UnsafeAddrOfPinnedArrayElement(values, 0),
-                        4,
-                        s_cfTypeDictionaryKeyCallBacks,
-                        s_cfTypeDictionaryValueCallBacks);
+                    nint utf16Length = CFStringGetLength(description);
+                    nint maxBytes = CFStringGetMaximumSizeForEncoding(utf16Length, kCFStringEncodingUTF8) + 1;
+                    var buffer = new byte[maxBytes];
+                    if (!CFStringGetCString(description, buffer, maxBytes, kCFStringEncodingUTF8))
+                        return operation + " failed.";
+                    int terminator = Array.IndexOf(buffer, (byte)0);
+                    if (terminator < 0) terminator = buffer.Length;
+                    return operation + " failed: " + System.Text.Encoding.UTF8.GetString(buffer, 0, terminator);
                 }
                 finally
                 {
-                    keysHandle.Free();
-                    valuesHandle.Free();
+                    CFRelease(description);
                 }
             }
             finally
             {
-                if (keySizeNumber != IntPtr.Zero) CFRelease(keySizeNumber);
+                CFRelease(error);
             }
         }
 
@@ -423,5 +529,29 @@ internal sealed class AppleSecKeyProtector : KeyAtRestProtector, IDisposable
             IntPtr algorithm,
             IntPtr ciphertext,
             ref IntPtr error);
+
+        [DllImport(SecurityFramework)]
+        public static extern IntPtr SecAccessControlCreateWithFlags(
+            IntPtr allocator,
+            IntPtr protection,
+            nuint flags,
+            ref IntPtr error);
+
+        [DllImport(CoreFoundationFramework)]
+        public static extern IntPtr CFErrorCopyDescription(IntPtr err);
+
+        [DllImport(CoreFoundationFramework)]
+        public static extern nint CFStringGetLength(IntPtr theString);
+
+        [DllImport(CoreFoundationFramework)]
+        public static extern nint CFStringGetMaximumSizeForEncoding(nint length, uint encoding);
+
+        [DllImport(CoreFoundationFramework)]
+        [return: MarshalAs(UnmanagedType.I1)]
+        public static extern bool CFStringGetCString(
+            IntPtr theString,
+            byte[] buffer,
+            nint bufferSize,
+            uint encoding);
     }
 }
