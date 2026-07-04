@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.0](https://github.com/Alpaq92/TopSecret.ProtectedString/compare/v1.0.1...v1.1.0) (2026-07-04)
+
+
+### Features
+
+* **demo:** animate loading dots, theme the terminal scrollbar, fix rerun freeze ([dd4e844](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/dd4e8446c9cc28f9f5fc798af755b88ad8cf3d77))
+
 ## [1.0.1](https://github.com/Alpaq92/TopSecret.ProtectedString/compare/v1.0.0...v1.0.1) (2026-07-04)
 
 
