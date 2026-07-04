@@ -36,18 +36,37 @@ namespace TopSecret;
 /// in a <c>finally</c> block on the way out.
 /// </para>
 /// <para>
-/// <b>Residual: BouncyCastle holds non-zeroable copies.</b> BC's
-/// <c>KeyParameter</c> and <c>AeadParameters</c> wrap the byte arrays we
-/// allocate; <c>GcmBlockCipher</c>'s internal state may further derive
-/// from them. We zero our buffers, but BC may retain copies inside its
-/// own state until those objects become unreachable and the GC reclaims
-/// them. Memory locking (<c>mlock</c>) is not reachable from inside the
-/// WASM sandbox so this byte-residue lives in the WASM linear memory
-/// for the GC's reclaim window. The threat model on browser-wasm is
-/// "secrets do not escape the WebAssembly module"; the WASM linear
-/// memory is not paged to disk and is sandboxed away from other
-/// origins, so the residue does not leak. If your threat model is
-/// stricter, do not rely on the browser-wasm TFM.
+/// <b>Residual: BouncyCastle holds non-zeroable copies.</b> Confirmed against
+/// BC's own source, not just inferred: <c>KeyParameter</c>'s constructor
+/// <i>copies</i> the key bytes (<c>Arrays.CopyBuffer</c>) rather than holding
+/// our array by reference, so it is already an independent copy the instant
+/// it's constructed — not something that becomes stale only once we zero our
+/// buffer. <c>AesEngine</c> separately derives the expanded AES round-key
+/// schedule into its own <c>WorkingKey</c> field, and <c>GcmBlockCipher</c>
+/// derives the GHASH subkey <c>H</c> (and a precomputed multiplication table)
+/// into its own fields. None of these three copies is reachable or wipeable
+/// through any public BC API — there is no <c>Dispose</c>/wipe method on any
+/// of these types. We zero our own buffers and, immediately after,
+/// null every local reference to the BC objects and force a Gen0 GC
+/// (<see cref="GC.Collect(int, GCCollectionMode, bool)"/>) so they — and the
+/// three copies above — become unreachable and eligible for reclaim as soon
+/// as possible, rather than whenever the runtime next happens to collect on
+/// its own (which, for an app that constructs one <see cref="ProtectedString"/>
+/// and calls <see cref="ProtectedString.Access(Action{char[]})"/> once, could
+/// be "never" before the tab closes). This shrinks the window during which
+/// the key schedule and GHASH subkey are reachable from a live object graph
+/// and encourages the CLR to reuse that memory soon — it does
+/// <i>not</i> zero the underlying bytes (the CLR does not clear reclaimed
+/// memory on collection), so a raw memory scan could still recover them
+/// until the space is overwritten by a later allocation. The Gen0-only,
+/// blocking collection trades real per-call CPU cost for that narrower
+/// window; memory locking (<c>mlock</c>) is not reachable from inside the
+/// WASM sandbox at all, so this is the only lever available here. The
+/// threat model on browser-wasm is "secrets do not escape the WebAssembly
+/// module"; the WASM linear memory is not paged to disk and is sandboxed
+/// away from other origins, so the residue does not leak across that
+/// boundary. If your threat model is stricter, do not rely on the
+/// browser-wasm TFM.
 /// </para>
 /// </remarks>
 internal static class AesGcmShim
@@ -122,17 +141,21 @@ internal static class AesGcmShim
         Span<byte> tag,
         ReadOnlySpan<byte> associatedData)
     {
-        // BC's AeadParameters / KeyParameter take byte[] by reference and
-        // hold them internally. We allocate pinned copies so the GC cannot
-        // duplicate them mid-op, and zero-then-orphan them on the way out.
-        // The KeyParameter / AeadParameters instances themselves still hold
-        // references to the (now-zeroed) buffers until the GC reclaims
-        // them — see remarks at the top of the type for the trade-off.
+        // We allocate pinned copies of key/nonce/AAD/plaintext/ciphertext so
+        // the GC cannot duplicate them mid-op, and zero them on the way out.
+        // BC's KeyParameter, AesEngine, and GcmBlockCipher separately hold
+        // THEIR OWN unreachable copies/derivations of the key material (see
+        // remarks at the top of the type) — cipher/keyParameter/parameters
+        // are declared here, outside the try, so ReleaseBouncyState can null
+        // every reference to them in finally.
         byte[]? keyCopy = null;
         byte[]? nonceCopy = null;
         byte[]? aadCopy = null;
         byte[]? inputCopy = null;
         byte[]? output = null;
+        GcmBlockCipher? cipher = null;
+        KeyParameter? keyParameter = null;
+        AeadParameters? parameters = null;
         try
         {
             keyCopy = AllocatePinnedScratch(key.Length);
@@ -142,9 +165,10 @@ internal static class AesGcmShim
             aadCopy = AllocatePinnedScratch(associatedData.Length);
             associatedData.CopyTo(aadCopy);
 
-            var cipher = new GcmBlockCipher(new AesEngine());
-            var parameters = new AeadParameters(
-                new KeyParameter(keyCopy),
+            cipher = new GcmBlockCipher(new AesEngine());
+            keyParameter = new KeyParameter(keyCopy);
+            parameters = new AeadParameters(
+                keyParameter,
                 macSize: TagSize * 8,
                 nonce: nonceCopy,
                 associatedText: aadCopy);
@@ -168,6 +192,7 @@ internal static class AesGcmShim
             if (aadCopy is not null) CryptographicOperations.ZeroMemory(aadCopy);
             if (inputCopy is not null) CryptographicOperations.ZeroMemory(inputCopy);
             if (output is not null) CryptographicOperations.ZeroMemory(output);
+            ReleaseBouncyState(ref cipher, ref keyParameter, ref parameters);
         }
     }
 
@@ -184,6 +209,9 @@ internal static class AesGcmShim
         byte[]? aadCopy = null;
         byte[]? input = null;
         byte[]? output = null;
+        GcmBlockCipher? cipher = null;
+        KeyParameter? keyParameter = null;
+        AeadParameters? parameters = null;
         try
         {
             keyCopy = AllocatePinnedScratch(key.Length);
@@ -193,9 +221,10 @@ internal static class AesGcmShim
             aadCopy = AllocatePinnedScratch(associatedData.Length);
             associatedData.CopyTo(aadCopy);
 
-            var cipher = new GcmBlockCipher(new AesEngine());
-            var parameters = new AeadParameters(
-                new KeyParameter(keyCopy),
+            cipher = new GcmBlockCipher(new AesEngine());
+            keyParameter = new KeyParameter(keyCopy);
+            parameters = new AeadParameters(
+                keyParameter,
                 macSize: TagSize * 8,
                 nonce: nonceCopy,
                 associatedText: aadCopy);
@@ -243,7 +272,27 @@ internal static class AesGcmShim
             if (aadCopy is not null) CryptographicOperations.ZeroMemory(aadCopy);
             if (input is not null) CryptographicOperations.ZeroMemory(input);
             if (output is not null) CryptographicOperations.ZeroMemory(output);
+            ReleaseBouncyState(ref cipher, ref keyParameter, ref parameters);
         }
+    }
+
+    /// <summary>
+    /// Drops every reference to the BC objects that hold their own
+    /// unreachable copies/derivations of the key material (see the type's
+    /// remarks) and forces a Gen0 collection so they become eligible for
+    /// reclaim immediately, rather than whenever the runtime next happens to
+    /// collect on its own. Gen0-only: these objects are allocated and
+    /// released within a single call and are not expected to have been
+    /// promoted. Shrinks the reachability window; does not zero the
+    /// underlying bytes — see the type-level remarks for the exact trade-off.
+    /// </summary>
+    private static void ReleaseBouncyState(
+        ref GcmBlockCipher? cipher, ref KeyParameter? keyParameter, ref AeadParameters? parameters)
+    {
+        cipher = null;
+        keyParameter = null;
+        parameters = null;
+        GC.Collect(0, GCCollectionMode.Forced, blocking: true);
     }
 #endif
 }
