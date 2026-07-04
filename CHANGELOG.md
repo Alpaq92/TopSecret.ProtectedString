@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.2](https://github.com/Alpaq92/TopSecret.ProtectedString/compare/v0.1.1...v0.1.2) (2026-07-04)
+
+
+### Bug Fixes
+
+* **review:** let CodeRabbit actually approve PRs ([66fc6ad](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/66fc6add8aa639754b3a4dd04b82ac76bf8653b6))
+
 ## [0.1.1](https://github.com/Alpaq92/TopSecret.ProtectedString/compare/v0.1.0...v0.1.1) (2026-07-04)
 
 
