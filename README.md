@@ -156,6 +156,8 @@ byte[] stored = ps.ComputeArgon2idHash(salt);   // t=3, m=19 MiB, p=1, 32-byte o
 // ... later, on a login attempt:
 using var attempt = new ProtectedString(submittedPassword);
 bool ok = attempt.VerifyArgon2idHash(stored, salt);
+// Not on browser-wasm: Argon2id throws PlatformNotSupportedException there —
+// hash server-side (see the browser-wasm section for the full rationale).
 ```
 
 ### Interop with string-only APIs
@@ -424,8 +426,8 @@ It also opts into `KeyAtRestProtection.HardwareBackedPreferred` at startup so th
 | `Equals(ProtectedString)` | Constant-time comparison. (`Equals(object?)` is a one-line override that defers to this; same behavior.) |
 | `GetHashCode()` | Length-only hash. Plaintext intentionally does not contribute, so a dictionary-bucket lookup never reveals anything about the secret through its hash function. |
 | `ToString()` | Returns `ProtectedString[length=N]` (or `ProtectedString[disposed]`) — never the plaintext, so accidental logging is safe. |
-| `ComputeArgon2idHash(salt, iterations, memoryKb, parallelism, hashLengthBytes)` | Compute an Argon2id hash of the plaintext. OWASP-aligned defaults (`t=3`, `m=19 MiB`, `p=1`, 32-byte output). |
-| `VerifyArgon2idHash(expectedHash, salt, iterations, memoryKb, parallelism)` | Constant-time verification against a previously stored hash. |
+| `ComputeArgon2idHash(salt, iterations, memoryKb, parallelism, hashLengthBytes)` | Compute an Argon2id hash of the plaintext. OWASP-aligned defaults (`t=3`, `m=19 MiB`, `p=1`, 32-byte output). Not supported on the single-threaded browser runtime — throws `PlatformNotSupportedException` there (see [`browser-wasm` support](#browser-wasm-support)). |
+| `VerifyArgon2idHash(expectedHash, salt, iterations, memoryKb, parallelism)` | Constant-time verification against a previously stored hash. Same browser caveat as `ComputeArgon2idHash`. |
 | `Dispose()` | Zero the ciphertext, nonce, tag, and any in-flight build buffer. |
 | `static HardwareBackedAvailability` | Probe whether a hardware-backed master-key protector is available on this host. See [Key-at-rest wrapping](#key-at-rest-wrapping-opt-in-tiered). |
 | `static RotateProcessKey()` | Re-encrypt every live instance under a fresh master AES key. Requires `ProcessKeyRotationPolicy != Disabled`. See [Process-key rotation](#process-key-rotation-opt-in). |
@@ -765,6 +767,8 @@ For a per-request credential validation that goes through `Equals` or `Access`, 
 
 Argon2id is **intentionally slow** — that is its job as a password KDF. At the OWASP-aligned defaults (see [API surface](#api-surface) for the parameters), expect tens to low hundreds of milliseconds per hash on commodity hardware. Tune via the explicit-parameter overload only if you understand the trade-off between attacker-cost and your own login-path latency.
 
+The API is deliberately **synchronous-only**. An async shape (`ComputeArgon2idHashAsync`, awaiting the KDF instead of blocking) was prototyped — it is the only shape that could run on the single-threaded browser runtime — and then **rejected after an adversarial review**: the sync method holds the per-instance lock for the whole KDF, and releasing that lock across an `await` demonstrably regresses three security invariants (overlapping KDF-lifetime pinned scratch copies under page-granular, non-refcounted `VirtualLock`/`mlock`; the loss of "`Dispose` returned ⇒ no library-held plaintext copy exists"; and a stale-verify linearization race). Restoring those invariants requires a per-instance async gate plus deadlock guards — more concurrency machinery than a security-critical type should carry for one platform's benefit. Consequence: Argon2id **throws `PlatformNotSupportedException` on `net10.0-browser`** ([details](#browser-wasm-support)); hash credentials server-side in browser apps.
+
 ### Memory footprint
 
 | State | Per-instance cost |
@@ -819,7 +823,7 @@ The `ci.yml` Linux leg additionally runs an AOT publish dry-run with warnings es
 | `TopSecret.ProtectedString.Configuration` | Optional `appsettings.json` binder — a single extension method (`BindProtectedStringOptions`) that wraps the `Enum.TryParse` / `TimeSpan.TryParse` boilerplate. Takes a single dependency on `Microsoft.Extensions.Configuration.Abstractions` so the main package stays dependency-minimal. |
 | `TopSecret.ProtectedBlob` | Large-secret-blob sibling — chunked AES-GCM-256 envelope for multi-MB byte blobs, key wrapped under the shared process master (see [ProtectedBlob](#protectedblob-large-secret-blobs)). Bundles the same analyzer at `analyzers/dotnet/cs/`. |
 
-Two packaging details worth knowing: `TopSecret.ProtectedString` and `TopSecret.ProtectedBlob` each pack their **own focused NuGet `README.md`** (living next to the respective `.csproj`, sized for the nuget.org landing page), while the three satellite packages pack this root README. Icons are per-package as well — `assets/string/`, `assets/blob/`, and `assets/rest/` (see [Icon](#icon)).
+Two packaging details worth knowing: all five packages share **one NuGet `README.md`** ([`docs/nuget/README.md`](docs/nuget/README.md) — pure markdown sized for the nuget.org landing page, since nuget.org strips raw HTML), while this root README stays the GitHub-only landing page. Icons are per-package — `assets/string/`, `assets/blob/`, and `assets/rest/` (see [Icon](#icon)).
 
 Each release also redeploys the [live browser demo](https://alpaq92.github.io/TopSecret.ProtectedString/) via [`pages.yml`](.github/workflows/pages.yml).
 
@@ -867,7 +871,7 @@ The wire format agrees with the in-box `AesGcm` exactly, so the [Security model]
 
 Caveats specific to the browser path:
 
-- **Argon2id runs with single-lane parallelism on `net10.0-browser`.** The managed Argon2 (Konscious) only needs worker threads when `DegreeOfParallelism > 1`; at the library's default `p = 1` it runs on a single thread, so `ComputeArgon2idHash` / `VerifyArgon2idHash` work in the browser (just slower — memory-hard hashing is interpreter-bound in WASM). Do **not** raise `parallelism` above 1 on the browser TFM: the extra lanes need threads the single-threaded WASM runtime lacks, which would throw. If you need multi-lane Argon2 in the browser, hash server-side or track .NET's multithreaded-WASM work.
+- **Argon2id is not supported in the browser — deliberately.** Konscious (the managed Argon2 underneath) has no truly synchronous path: its sync `GetBytes` is `Task.Run(...).Result`, which cannot complete on the single-threaded WASM runtime — `.Result` blocks the only thread, and the queued lane work needs that very thread ([Konscious #22](https://github.com/kmaragon/Konscious.Security.Cryptography/issues/22)). The library fails fast and honestly: `ComputeArgon2idHash` / `VerifyArgon2idHash` **throw `PlatformNotSupportedException` on `net10.0-browser`**, and the live demo's Argon2id step reports itself unsupported there. An awaited async wrapper (which *would* complete on one thread) was prototyped and adversarially reviewed, then **rejected**: releasing the instance lock across the KDF `await` regresses the sync path's security invariants — overlapped hashes multiply long-lived pinned plaintext scratch copies (page-granular `mlock`/`VirtualLock` is not refcounted and the `RLIMIT_MEMLOCK` budget is small), `Dispose` stops being a barrier proving no library-held plaintext remains, and verify/mutate interleavings can accept a stale credential — and the gate-and-guard machinery needed to restore them adds more concurrency surface to a security-critical type than one platform's KDF is worth. Browser guidance: verify credentials **server-side** (where they should be verified anyway); the alternatives were also evaluated and rejected — Isopoh (CC0 license), Soenneker (wraps the same Konscious), NSec (native libsodium, no `browser-wasm` RID). Revisit if .NET's multithreaded WASM lands or a permissively-licensed, browser-safe managed Argon2 appears.
 - **Memory locking is a no-op.** `mlock` / `VirtualLock` aren't reachable from inside the WebAssembly sandbox, so `MemoryLocker` silently degrades to "best effort" (its existing `try { ... } catch { return false; }` probe path). The threat model on browser is "don't let secrets escape the WASM module" rather than "don't let secrets be paged out" — there is no swap to leak to.
 - **`<IsAotCompatible>` is suspended on `net10.0-browser` only.** BouncyCastle is not yet trim/AOT clean. The wasm runtime AOT-compiles to native WebAssembly via the `wasm-tools` workload independently of the IL-level trimmer, so this does not affect the user-visible AOT story on browser.
 - **Hardware-backed wrap is unavailable.** No SEP, no Keystore, no TPM on the browser. `KeyAtRestProtection.HardwareBackedRequired` throws on construction; `HardwareBackedPreferred` falls through to the obscurity tier (HKDF stream-XOR), then to the no-op tier — same as any other platform without a hardware-backed provider registered.
@@ -1071,12 +1075,12 @@ References used while auditing this implementation. Everything beyond *"this enc
 ## Repository layout
 
 ```
-TopSecret.ProtectedString/                       # main cross-platform library (NuGet; packs its own focused NuGet README.md)
+TopSecret.ProtectedString/                       # main cross-platform library (NuGet)
 TopSecret.ProtectedString.Analyzers/             # Roslyn analyzer (TPS001 / TPS002), packed into the main NuGet
 TopSecret.ProtectedString.Configuration/         # optional appsettings.json binder subpackage (NuGet)
 TopSecret.ProtectedString.WindowsTpm/            # optional Windows TPM 2.0 subpackage (NuGet)
 TopSecret.ProtectedString.LinuxTpm/              # optional Linux TPM 2.0 subpackage (NuGet)
-TopSecret.ProtectedBlob/                         # large-secret-blob sibling package — chunked AEAD (NuGet; packs its own focused NuGet README.md)
+TopSecret.ProtectedBlob/                         # large-secret-blob sibling package — chunked AEAD (NuGet)
 TopSecret.ProtectedBlob.Tests/                   # NUnit tests: wire-format pinning, tamper matrix, API drift guard
 TopSecret.ProtectedString.Tests/                 # NUnit 4 cross-platform tests + API-table drift guard
 TopSecret.ProtectedString.Analyzers.Tests/       # NUnit 4 analyzer detection-rule tests (hosts the analyzer in-memory)
@@ -1086,6 +1090,7 @@ TopSecret.ProtectedString.LinuxTpm.Tests/        # NUnit 4 Linux-only smoke test
 TopSecret.Demo.Core/                             # shared demo scenarios + DemoTests + the in-process NUnit runner (net10.0 library)
 TopSecret.Demo/                                  # runnable console demo host (the .slnLaunch sets this as the default startup project)
 TopSecret.Demo.Wasm/                             # browser demo host: Demo.Core in xterm.js on .NET WebAssembly, deployed to GitHub Pages per push (not in the .sln — needs wasm-tools)
+docs/nuget/                                      # the single shared NuGet README packed into all five packages
 TopSecret.ProtectedString.sln
 TopSecret.ProtectedString.slnLaunch              # committed VS launch profile pinning the Demo project
 Directory.Build.props                            # release-time PackageReleaseNotes injection (reads release_notes.txt when the file exists)
