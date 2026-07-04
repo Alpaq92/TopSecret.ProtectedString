@@ -92,6 +92,28 @@
             background: var(--bg);
         }
         #terminal .xterm { height: 100%; }
+        /* xterm scrolls its own internal viewport div, whose scrollbar is
+           unthemed by default — the browser renders it (track, thumb, and
+           especially the corner where the vertical scrollbar meets the
+           bottom edge) in its native light colours regardless of page
+           theme, showing up as a stray white patch in dark mode. */
+        #terminal .xterm-viewport {
+            scrollbar-color: var(--border) var(--bg);
+        }
+        #terminal .xterm-viewport::-webkit-scrollbar {
+            width: 10px;
+            height: 10px;
+        }
+        #terminal .xterm-viewport::-webkit-scrollbar-track {
+            background: var(--bg);
+        }
+        #terminal .xterm-viewport::-webkit-scrollbar-thumb {
+            background: var(--border);
+            border-radius: 5px;
+        }
+        #terminal .xterm-viewport::-webkit-scrollbar-corner {
+            background: var(--bg);
+        }
     </style>
     <script type="module" src="main.js"></script>
 </head>

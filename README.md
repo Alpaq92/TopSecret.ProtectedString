@@ -6,6 +6,7 @@
 <a href="https://www.nuget.org/packages/TopSecret.ProtectedString.LinuxTpm"><img alt="NuGet: .LinuxTpm" src="https://img.shields.io/nuget/v/TopSecret.ProtectedString.LinuxTpm.svg?label=.LinuxTpm"></a>
 <a href="https://www.nuget.org/packages/TopSecret.ProtectedString.Configuration"><img alt="NuGet: .Configuration" src="https://img.shields.io/nuget/v/TopSecret.ProtectedString.Configuration.svg?label=.Configuration"></a>
 <a href="https://www.nuget.org/packages/TopSecret.ProtectedBlob"><img alt="NuGet: TopSecret.ProtectedBlob" src="https://img.shields.io/nuget/v/TopSecret.ProtectedBlob.svg?label=TopSecret.ProtectedBlob"></a>
+<a href="https://www.nuget.org/packages/TopSecret.ProtectedString"><img alt="NuGet downloads" src="https://img.shields.io/nuget/dt/TopSecret.ProtectedString.svg?label=downloads"></a>
 <a href="https://github.com/Alpaq92/TopSecret.ProtectedString/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/Alpaq92/TopSecret.ProtectedString/ci.yml?branch=master&label=CI"></a>
 <a href="https://github.com/Alpaq92/TopSecret.ProtectedString/actions/workflows/release.yml"><img alt="Release" src="https://img.shields.io/github/actions/workflow/status/Alpaq92/TopSecret.ProtectedString/release.yml?branch=master&label=Release"></a>
 <a href="https://alpaq92.github.io/TopSecret.ProtectedString/"><img alt="Live demo" src="https://img.shields.io/badge/demo-GitHub%20Pages-2ea44f"></a>
@@ -169,6 +170,8 @@ bool ok = attempt.VerifyArgon2idHash(stored, salt);
 The general rule: **prefer streaming sinks** (`WriteUtf8To` / `CopyTo`) when the API exposes a `Stream` / `Span<char>` / `byte[]`, and **materialize inside `Access` then suppress [TPS001](#build-time-analyzer-tps001--tps002) narrowly** when the BCL truly forces a `string` — the analyzer exists to make sure you reach for that escape hatch deliberately.
 
 `ToString()` deliberately does **not** include the plaintext — it returns `ProtectedString[length=N]` so that accidental logging is safe.
+
+`GetHashCode()` applies exactly the same principle: it depends only on `length`, never the plaintext, so a dictionary or hash-set bucket can't reveal anything about the value either.
 
 **Approaches in order of preference:**
 

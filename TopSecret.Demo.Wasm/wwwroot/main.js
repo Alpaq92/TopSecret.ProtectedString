@@ -68,7 +68,20 @@ term.open(terminalEl);
 // only when the container actually has a size (a zero-size fit would set
 // 0 rows and swallow every subsequent write). Fit on the next frame (after
 // layout) and on resize.
-term.writeln('Loading .NET WebAssembly runtime…');
+//
+// The loading line animates in place — "." -> ".." -> "..." -> "." -> ... —
+// via \r (return to column 0) + term.write (not writeln, which would print
+// a new line every frame). Padded to a fixed 3-dot width so a shorter frame
+// can't leave a stray character from a longer one uncleared. Runs only
+// while the boot is the only thing on screen; stopped the instant
+// dotnet.create() resolves, before any real demo output starts.
+const LOADING_TEXT = 'Loading .NET WebAssembly runtime';
+let loadingDots = 0;
+term.write(LOADING_TEXT);
+const loadingAnimation = setInterval(() => {
+    loadingDots = (loadingDots % 3) + 1;
+    term.write('\r' + LOADING_TEXT + '.'.repeat(loadingDots) + ' '.repeat(3 - loadingDots));
+}, 400);
 const refit = () => {
     if (terminalEl.clientHeight > 0 && terminalEl.clientWidth > 0) {
         try { fitAddon.fit(); } catch { /* ignore transient sizing errors */ }
@@ -86,6 +99,9 @@ window.addEventListener('resize', refit);
 const { setModuleImports, getAssemblyExports, getConfig } = await dotnet
     .withDiagnosticTracing(false)
     .create();
+
+clearInterval(loadingAnimation);
+term.write('\r' + LOADING_TEXT + '...\n'); // settle on a clean final frame before real output starts
 
 // The WASM demo produces all its output synchronously, then returns; if we
 // wrote each line straight to xterm the whole run would paint in one frame.
@@ -116,6 +132,14 @@ async function runDemo(isRerun) {
         term.clear();
         lineQueue.length = 0;
         term.writeln('Re-running the demo on the .NET WebAssembly runtime…');
+        // RunDemo() below runs synchronously on the main thread once called —
+        // without yielding here first, the clear + status line above would
+        // never get painted before that call locks up the tab, making the
+        // click look like it did nothing until the whole run finishes.
+        // A setTimeout(0) yield gives the browser a chance to paint; unlike
+        // requestAnimationFrame it still fires when the tab isn't visible or
+        // has no active compositor, so this can't hang indefinitely.
+        await new Promise((resolve) => setTimeout(resolve, 0));
     }
     try {
         await exports.TopSecret.DemoWasm.Program.RunDemo();
