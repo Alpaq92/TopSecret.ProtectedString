@@ -14,13 +14,13 @@
 
 <br>
 
-**▶ [Try the live demo in your browser](https://alpaq92.github.io/TopSecret.ProtectedString/)** — the full scenario walkthrough plus a live NUnit run, all executing on the actual library, entirely client-side on .NET WebAssembly with no server involved.
-
 A cross-platform, .NET 10 alternative to `System.Security.SecureString` that actually encrypts its contents at rest in live process memory, using authenticated AES-GCM-256 encryption, on every single supported platform — Windows, Linux, macOS, Android, iOS, Mac Catalyst, and browser WebAssembly.
 
 > Microsoft now [recommends against using `SecureString` for new code](https://learn.microsoft.com/dotnet/api/system.security.securestring#remarks), partly because on non-Windows platforms it does not encrypt the buffer at all. This library is meant to fill that gap with the same usage shape developers already know. See [Replacing `SecureString`](#replacing-securestring) for the side-by-side and the migration mapping.
 
 Two front-line packages ship from this repo and cover the two ends of the spectrum: **`TopSecret.ProtectedString`** for credential-sized secrets like passwords and tokens, and **[`TopSecret.ProtectedBlob`](#protectedblob-large-secret-blobs)** for multi-MB secret byte blobs — plus optional satellite packages for [TPM-backed key wrapping](#key-at-rest-wrapping-opt-in-tiered) and [configuration binding](#configuration-binding-from-appsettingsjson).
+
+**▶ [Try the live demo in your browser](https://alpaq92.github.io/TopSecret.ProtectedString/)** — the full scenario walkthrough plus a live NUnit run, all executing on the actual library, entirely client-side on .NET WebAssembly with no server involved.
 
 ## Table of contents
 
