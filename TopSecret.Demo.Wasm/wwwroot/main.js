@@ -68,35 +68,7 @@ term.open(terminalEl);
 // only when the container actually has a size (a zero-size fit would set
 // 0 rows and swallow every subsequent write). Fit on the next frame (after
 // layout) and on resize.
-//
-// The loading line animates in place — "." -> ".." -> "..." -> "." -> ... —
-// via the CUP escape \x1b[H (cursor to row 1, col 1) + term.write (not
-// writeln, which would print a new line every frame). CUP-to-home is used
-// instead of a bare \r: this line is the very first thing written to the
-// terminal, so if it's ever wide enough to soft-wrap onto a second row, \r
-// alone would return to column 0 of whatever row the cursor ended up on
-// (the wrapped second row), not the true start of the line — every
-// subsequent frame would then render one row lower, corrupting the display
-// instead of overwriting cleanly. Padded to a fixed 3-dot width so a
-// shorter frame can't leave a stray character from a longer one uncleared.
-// Runs only while the boot is the only thing on screen; stopped the
-// instant dotnet.create() resolves, before any real demo output starts.
-//
-// The first frame paints immediately (not on the first timer tick) and the
-// cadence is fast (90ms): the whole boot can finish in well under a
-// second — on a warm cache, network fetches are near-instant and only the
-// WASM instantiation + .NET startup remain — so a slower cadence risked
-// only 3-4 visible frames total, barely readable as motion.
-const CUP_HOME = '\x1b[H'; // cursor to row 1, col 1 — see rationale above
-const LOADING_TEXT = 'Loading .NET WebAssembly runtime';
-const LOADING_FRAMES = ['.  ', '.. ', '...']; // the only 3 states this ever renders
-let loadingFrame = -1; // pre-increment below lands the first call on index 0
-const paintLoadingFrame = () => {
-    loadingFrame = (loadingFrame + 1) % LOADING_FRAMES.length;
-    term.write(CUP_HOME + LOADING_TEXT + LOADING_FRAMES[loadingFrame]);
-};
-paintLoadingFrame();
-const loadingAnimation = setInterval(paintLoadingFrame, 90);
+term.writeln('Loading .NET WebAssembly runtime...');
 const refit = () => {
     if (terminalEl.clientHeight > 0 && terminalEl.clientWidth > 0) {
         try { fitAddon.fit(); } catch { /* ignore transient sizing errors */ }
@@ -114,9 +86,6 @@ window.addEventListener('resize', refit);
 const { setModuleImports, getAssemblyExports, getConfig } = await dotnet
     .withDiagnosticTracing(false)
     .create();
-
-clearInterval(loadingAnimation);
-term.write(CUP_HOME + LOADING_TEXT + '...\n'); // settle on a clean final frame before real output starts
 
 // The WASM demo produces all its output synchronously, then returns; if we
 // wrote each line straight to xterm the whole run would paint in one frame.
