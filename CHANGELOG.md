@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.1.1](https://github.com/Alpaq92/TopSecret.ProtectedString/compare/v2.1.0...v2.1.1) (2026-07-05)
+
+
+### Bug Fixes
+
+* **demo:** drop the loading-dot animation, use a static ellipsis ([57594da](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/57594dab48b9d116362339ade10ed82fd948a4fa))
+
 ## [2.1.0](https://github.com/Alpaq92/TopSecret.ProtectedString/compare/v2.0.0...v2.1.0) (2026-07-05)
 
 
