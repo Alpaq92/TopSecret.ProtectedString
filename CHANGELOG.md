@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.1.0](https://github.com/Alpaq92/TopSecret.ProtectedString/compare/v2.0.0...v2.1.0) (2026-07-05)
+
+
+### Features
+
+* **demo:** use the package icon as the WASM demo's favicon ([fdda87d](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/fdda87dd748e0afabce270d0a013cbebb2051c3b))
+
+
+### Bug Fixes
+
+* **demo:** fix cursor homing and simplify the loading-dot animation ([ddbedef](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/ddbedeff3787348ae4a03c50a741ffce2ad075f3))
+
 ## [2.0.0](https://github.com/Alpaq92/TopSecret.ProtectedString/compare/v1.1.0...v2.0.0) (2026-07-04)
 
 
