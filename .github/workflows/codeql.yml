@@ -22,26 +22,30 @@ concurrency:
   group: codeql-${{ github.ref }}
   cancel-in-progress: true
 
-permissions:
-  contents: read
-  security-events: write
-
 jobs:
   analyze:
     name: Analyze (C#)
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # Job-level permissions replace (not merge with) any workflow-level
+    # block, so both grants live here even though only one job exists —
+    # scoping them to the job that actually needs them, not the workflow.
+    permissions:
+      contents: read
+      security-events: write
     env:
       CI_TFMS: net10.0
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
 
       - name: Setup .NET
         uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@411c4c9a36b3fca4d674f06b6396b2c6d23522c6 # v3
+        uses: github/codeql-action/init@54f647b7e1bb85c95cddabcd46b0c578ec92bc1a # v4
         with:
           languages: csharp
 
@@ -52,4 +56,4 @@ jobs:
         run: dotnet build TopSecret.ProtectedString.sln --configuration Release --no-restore
 
       - name: Perform CodeQL analysis
-        uses: github/codeql-action/analyze@411c4c9a36b3fca4d674f06b6396b2c6d23522c6 # v3
+        uses: github/codeql-action/analyze@54f647b7e1bb85c95cddabcd46b0c578ec92bc1a # v4
