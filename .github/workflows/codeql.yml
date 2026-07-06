@@ -1,0 +1,55 @@
+name: CodeQL
+
+# Static analysis for the C# surface of this repo — runs on every push/PR to
+# master plus a weekly schedule, so newly-added CodeQL query patterns get a
+# chance to flag existing code, not just new diffs.
+#
+# Scoped to net10.0 on ubuntu-latest via CI_TFMS (the same mechanism
+# ci.yml's ubuntu leg uses): CodeQL needs one successful build to extract
+# from, and the platform TFMs (ios/android/macos/browser) need workloads
+# and runners this leg doesn't have — build-platform-tfms.yml and
+# release.yml already compile-check those separately.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  schedule:
+    - cron: '24 3 * * 1' # weekly, Monday 03:24 UTC
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  analyze:
+    name: Analyze (C#)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CI_TFMS: net10.0
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@411c4c9a36b3fca4d674f06b6396b2c6d23522c6 # v3
+        with:
+          languages: csharp
+
+      - name: Restore
+        run: dotnet restore
+
+      - name: Build
+        run: dotnet build TopSecret.ProtectedString.sln --configuration Release --no-restore
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@411c4c9a36b3fca4d674f06b6396b2c6d23522c6 # v3

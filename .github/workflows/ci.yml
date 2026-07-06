@@ -6,6 +6,9 @@ on:
   push:
     branches: [master]
 
+permissions:
+  contents: read
+
 # One CI run per ref at a time; a push flurry cancels superseded runs
 # instead of stacking them. (Once, 18 concurrently-hung runs exhausted the
 # account's ~20 concurrent-job quota and starved every other workflow.)
@@ -51,7 +54,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
       # global.json pins the SDK floor at 10.0.300 (with
       # `rollForward: latestFeature`, so any 10.0.3xx-or-newer SDK
@@ -63,7 +66,7 @@ jobs:
       # global.json when no version is given, installing the requested
       # floor on the runner if it isn't already present.
       - name: Setup .NET
-        uses: actions/setup-dotnet@v5
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
 
       # GitHub-hosted runners exist for Windows, Linux, and macOS but NOT
       # for iOS, Android, or browser WebAssembly. Those TFMs are
