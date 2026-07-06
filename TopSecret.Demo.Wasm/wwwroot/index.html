@@ -97,9 +97,14 @@
            unthemed by default — the browser renders it (track, thumb, and
            especially the corner where the vertical scrollbar meets the
            bottom edge) in its native light colours regardless of page
-           theme, showing up as a stray white patch in dark mode. */
+           theme, showing up as a stray white patch in dark mode.
+           xterm.css also hardcodes background-color: #000 on the viewport
+           and (as of xterm 6) never re-syncs it to the theme, so the
+           leftover strip below the last full row of cells shows through
+           as a black bar in light mode. */
         #terminal .xterm-viewport {
             scrollbar-color: var(--border) var(--bg);
+            background-color: var(--bg);
         }
         #terminal .xterm-viewport::-webkit-scrollbar {
             width: 10px;
