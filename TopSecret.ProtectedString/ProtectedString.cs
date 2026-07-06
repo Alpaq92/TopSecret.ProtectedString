@@ -1294,7 +1294,7 @@ public sealed class ProtectedString : IDisposable, IEquatable<ProtectedString>
         // change which key we encrypt under mid-operation.
         Debug.Assert(_instanceProtector is not null, "InitInstance must run before EncryptInternal");
 
-        int byteLen = plain.Length * 2;
+        int byteLen = checked(plain.Length * 2);
 
         // Allocate (and lock) the new state up front. If anything in here
         // throws — e.g., the configured policy is Throw and a lock failed —

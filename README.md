@@ -794,6 +794,8 @@ The fork's fix (v2.0.0) runs the first lane inline on the calling thread and dis
 
 The 32-byte process master key plus its protector live once per process, regardless of how many `ProtectedString`s you allocate. Memory locking has a per-process budget on libc targets — see [Memory-locking policy](#memory-locking-policy) for the budget number and the failure-behaviour knob.
 
+Content length is checked against 32-bit overflow before encryption: a plaintext at or beyond `int.MaxValue / 2` UTF-16 chars (~1.07 billion, since each char becomes 2 ciphertext bytes) throws `OverflowException` instead of silently under-allocating. In practice you'll hit `Array.MaxLength` or run out of process memory well before that threshold.
+
 ## Build & test
 
 ```
