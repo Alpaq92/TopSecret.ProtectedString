@@ -1,5 +1,19 @@
 # Changelog
 
+## [2.2.0](https://github.com/Alpaq92/TopSecret.ProtectedString/compare/v2.1.1...v2.2.0) (2026-07-06)
+
+
+### Features
+
+* **security:** add SECURITY.md, CodeQL scanning, and CI least-privilege hardening ([332bf3f](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/332bf3ff1118d3520fdac0eb25bb56d1d9d7b1ca))
+
+
+### Bug Fixes
+
+* **demo:** theme the xterm viewport background to remove the black bar in light mode ([2a54df0](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/2a54df0a093ddf798cf6efbe1a7a706c786aa470))
+* **security:** address CodeQL workflow review feedback ([0688074](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/0688074510363b8efe48a8e9871dc50206644faf))
+* **security:** guard against 32-bit overflow when sizing ciphertext buffers ([1ece169](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/1ece169658be8ff1e4dd33d1ee090b97fbaf751e))
+
 ## [2.1.1](https://github.com/Alpaq92/TopSecret.ProtectedString/compare/v2.1.0...v2.1.1) (2026-07-05)
 
 
