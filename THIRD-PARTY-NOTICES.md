@@ -42,7 +42,7 @@ CDDL 1.0  -- https://opensource.org/licenses/CDDL-1.0
 
 
 Design inspiration (no code copied; independent C# reimplementation):
-  - Evolveum GuardedString (OpenICF / ConnId connector framework) -- the encrypted-at-rest buffer, callback-based Access, and AppendChar / MakeReadOnly API shape are modelled after this Java class.   https://github.com/Evolveum/openicf/blob/master/framework/java/connector-framework/src/main/java/org/identityconnectors/common/security/GuardedString.java
+  - Evolveum GuardedString (OpenICF / ConnId connector framework; Copyright 2008-2009 Sun Microsystems, Inc.) -- the encrypted-at-rest buffer, callback-based Access, and AppendChar / MakeReadOnly API shape are modelled after this Java class.   https://github.com/Evolveum/openicf/blob/master/framework/java/connector-framework/src/main/java/org/identityconnectors/common/security/GuardedString.java
 
 
 
