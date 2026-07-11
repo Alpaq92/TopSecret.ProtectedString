@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.2.1](https://github.com/Alpaq92/TopSecret.ProtectedString/compare/v2.2.0...v2.2.1) (2026-07-11)
+
+
+### Documentation
+
+* **notices:** credit Sun Microsystems as GuardedString copyright holder ([420e4b9](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/420e4b9004ce381d2a3dc1913d0c01c22ab8ff5e))
+
 ## [2.2.0](https://github.com/Alpaq92/TopSecret.ProtectedString/compare/v2.1.1...v2.2.0) (2026-07-06)
 
 
