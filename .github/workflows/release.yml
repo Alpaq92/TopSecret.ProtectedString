@@ -69,8 +69,10 @@ jobs:
     needs: release-please
     if: ${{ always() && (needs.release-please.outputs.released == 'true' || github.event_name == 'workflow_dispatch') }}
     permissions:
-      contents: write # gh release upload
-      actions: write  # gh workflow run pages.yml
+      contents: write     # gh release upload
+      actions: write      # gh workflow run pages.yml
+      id-token: write     # attest-build-provenance: sign the provenance statement
+      attestations: write # attest-build-provenance: store it
     steps:
       - name: Resolve tag
         id: tag
@@ -133,6 +135,14 @@ jobs:
             echo "No .nupkg files produced" >&2
             exit 1
           fi
+
+      # Provenance attestation: binds each published .nupkg to this exact
+      # workflow run and commit. Consumers verify with:
+      #   gh attestation verify <package>.nupkg --repo Alpaq92/TopSecret.ProtectedString
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-path: ./nupkg/*.nupkg
 
       - name: Verify NuGet credentials
         shell: bash
