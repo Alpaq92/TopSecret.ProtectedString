@@ -224,11 +224,8 @@ internal sealed class WindowsTpmProtector : KeyAtRestProtector, IDisposable
         // Allocate the destination as a pinned + locked buffer up front.
         // It is sized to NCrypt's reported max, then trimmed if NCrypt
         // returns less.
-        var staging = GC.AllocateArray<byte>(requiredLen, pinned: true);
-        if (requiredLen > 0 && !MemoryLocker.TryLock(staging))
-        {
-            HardeningPolicy.OnFailure("memory locking unwrapped key");
-        }
+        var staging = ProtectedString.AllocatePinnedBytes(
+            requiredLen, excludeFromDumps: true, lockContext: "memory locking unwrapped key");
 
         bool ok = false;
         byte[] result = staging;
@@ -242,11 +239,8 @@ internal sealed class WindowsTpmProtector : KeyAtRestProtector, IDisposable
             {
                 // Promote the actual plaintext into a right-sized pinned/locked
                 // buffer and wipe the oversized staging buffer.
-                var sized = GC.AllocateArray<byte>(actualLen, pinned: true);
-                if (actualLen > 0 && !MemoryLocker.TryLock(sized))
-                {
-                    HardeningPolicy.OnFailure("memory locking unwrapped key");
-                }
+                var sized = ProtectedString.AllocatePinnedBytes(
+                    actualLen, excludeFromDumps: true, lockContext: "memory locking unwrapped key");
                 Array.Copy(staging, sized, actualLen);
                 CryptographicOperations.ZeroMemory(staging);
                 MemoryLocker.TryUnlock(staging);

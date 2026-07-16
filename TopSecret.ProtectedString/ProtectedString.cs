@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
@@ -11,8 +12,8 @@ namespace TopSecret;
 /// <summary>
 /// A cross-platform replacement for <see cref="System.Security.SecureString"/>.
 /// Stores sensitive characters encrypted in memory (AES-GCM with a per-process key)
-/// and exposes the plaintext only briefly through <see cref="Access(Action{char[]})"/>
-/// or <see cref="Access{T}(Func{char[], T})"/>. Inspired by Evolveum's
+/// and exposes the plaintext only briefly through <see cref="Access(ReadOnlySpanAction{char})"/>
+/// or <see cref="Access{T}(ReadOnlySpanFunc{char, T})"/>. Inspired by Evolveum's
 /// <c>GuardedString</c>.
 /// </summary>
 /// <remarks>
@@ -31,10 +32,16 @@ namespace TopSecret;
 ///   (and therefore never copies) it, and locked with <c>VirtualLock</c> /
 ///   <c>mlock</c> on first use so the OS will not page it out to swap.</item>
 ///   <item>Every plaintext buffer used during encrypt, decrypt, append, and
-///   <see cref="Access(Action{char[]})"/> is allocated as a pinned array,
-///   locked into resident memory, then wiped with
-///   <see cref="CryptographicOperations.ZeroMemory(Span{byte})"/> and unlocked
-///   on the way out — the JIT is forbidden from optimizing the wipe away.</item>
+///   <see cref="Access(ReadOnlySpanAction{char})"/> lives in pinned memory that
+///   is locked into resident RAM and excluded from OS crash dumps where the
+///   platform offers a primitive (WER dumps on Windows, kernel core dumps on
+///   Linux/Android — see <see cref="DumpExclusion"/> for exact coverage and
+///   limits), and is wiped with
+///   <see cref="CryptographicOperations.ZeroMemory(Span{byte})"/> on the way
+///   out — the JIT is forbidden from optimizing the wipe away. Hot-path
+///   scratch rents from <see cref="LockedScratchPool"/>, whose page-aligned
+///   slabs are locked and excluded once and deliberately never unlocked (see
+///   its remarks for why); standalone buffers unlock when wiped.</item>
 ///   <item>Equality and hash verification use
 ///   <see cref="CryptographicOperations.FixedTimeEquals(ReadOnlySpan{byte}, ReadOnlySpan{byte})"/>
 ///   so the comparison does not leak through timing.</item>
@@ -169,6 +176,7 @@ public sealed class ProtectedString : IDisposable, IEquatable<ProtectedString>
     {
         InitInstance();
         EncryptInternal(ReadOnlySpan<char>.Empty);
+        RegisterForRotation();
     }
 
     /// <summary>
@@ -179,6 +187,7 @@ public sealed class ProtectedString : IDisposable, IEquatable<ProtectedString>
     {
         InitInstance();
         EncryptInternal(value);
+        RegisterForRotation();
     }
 
     /// <summary>
@@ -205,6 +214,7 @@ public sealed class ProtectedString : IDisposable, IEquatable<ProtectedString>
                 CryptographicOperations.ZeroMemory(MemoryMarshal.AsBytes(value.AsSpan()));
             }
         }
+        RegisterForRotation();
     }
 
     /// <summary>
@@ -215,24 +225,87 @@ public sealed class ProtectedString : IDisposable, IEquatable<ProtectedString>
     /// </summary>
     private void InitInstance()
     {
-        var policy = ProtectedStringOptions.ProcessKeyRotationPolicy;
+        // Snapshot only. Registration into the rotation registry happens in
+        // RegisterForRotation, AFTER the constructor's initial encryption:
+        // the registry is what makes an instance visible to RotateProcessKey,
+        // and a rotation pass migrating a half-constructed instance would
+        // race the constructor's unsynchronized EncryptInternal — torn
+        // nonce/tag/ciphertext, or an encrypt under a protector the
+        // migration's Release just allowed to be disposed.
+        _instanceProtector = SnapshotProtectorWithRef();
+    }
 
-        if (policy == ProcessKeyRotation.Disabled)
-        {
-            // Fast path: no registry, no lock — just snapshot the global protector.
-            _instanceProtector = GetOrInitProtectorUnlocked();
-            return;
-        }
+    /// <summary>
+    /// Enters this instance into the rotation registry (when the policy is
+    /// non-<c>Disabled</c>) and arms the periodic timer. Every constructor
+    /// calls this AFTER its initial <see cref="EncryptInternal"/> — until it
+    /// runs, <see cref="RotateProcessKey"/> cannot see the instance, so a
+    /// migration cannot race the constructor. An instance whose construction
+    /// straddles a rotation may snapshot the outgoing protector and miss
+    /// that pass; it simply keeps (and ref-counts) the old protector, like
+    /// an instance created under a Disabled policy.
+    /// </summary>
+    private void RegisterForRotation()
+    {
+        var policy = ProtectedStringOptions.ProcessKeyRotationPolicy;
+        if (policy == ProcessKeyRotation.Disabled) return;
 
         lock (s_rotationLock)
         {
-            _instanceProtector = GetOrInitProtectorLocked();
+            if ((++s_addsSincePrune & 63) == 0)
+            {
+                PruneDeadInstancesLocked();
+            }
             s_liveInstances.Add(new WeakReference<ProtectedString>(this));
         }
 
         if (policy == ProcessKeyRotation.Periodic)
         {
             EnsurePeriodicRotationTimer();
+        }
+    }
+
+    /// <summary>Adds since the last dead-reference sweep of <see cref="s_liveInstances"/>.</summary>
+    private static int s_addsSincePrune;
+
+    /// <summary>
+    /// Drops dead <see cref="WeakReference{T}"/> entries. Rotation passes
+    /// prune too, but under <see cref="ProcessKeyRotation.OnDemand"/> with
+    /// high instance churn and rare rotations the list would otherwise grow
+    /// without bound. Caller holds <see cref="s_rotationLock"/>.
+    /// </summary>
+    private static void PruneDeadInstancesLocked()
+    {
+        for (int i = s_liveInstances.Count - 1; i >= 0; i--)
+        {
+            if (!s_liveInstances[i].TryGetTarget(out _))
+            {
+                s_liveInstances.RemoveAt(i);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Snapshots the current process protector and takes a
+    /// <see cref="ProtectorLifetime"/> reference on it, retrying if a
+    /// concurrent <see cref="RotateProcessKey"/> swapped the protector
+    /// between the snapshot and the AddRef. The Interlocked increment inside
+    /// <see cref="ProtectorLifetime.AddRef"/> is a full fence, so either this
+    /// re-validation observes the swap (and retries), or the rotation's
+    /// superseded-count check observes this reference — a disposed protector
+    /// can never be returned.
+    /// </summary>
+    private static KeyAtRestProtector SnapshotProtectorWithRef()
+    {
+        while (true)
+        {
+            var p = GetOrInitProtectorUnlocked();
+            ProtectorLifetime.AddRef(p);
+            if (ReferenceEquals(p, s_keyProtector))
+            {
+                return p;
+            }
+            ProtectorLifetime.Release(p);
         }
     }
 
@@ -250,11 +323,13 @@ public sealed class ProtectedString : IDisposable, IEquatable<ProtectedString>
     /// Consumed by sibling assemblies (<c>TopSecret.ProtectedBlob</c>) so the
     /// whole process shares one protector, one hardware-backed key slot, and
     /// one <see cref="ProtectedStringOptions.KeyAtRestProtection"/> posture.
-    /// Callers snapshot the returned reference per instance; a later
-    /// <see cref="RotateProcessKey"/> never disposes a superseded protector,
-    /// so snapshots stay valid for the holder's lifetime.
+    /// The returned reference carries a <see cref="ProtectorLifetime"/>
+    /// holder reference — the caller must call
+    /// <see cref="ProtectorLifetime.Release"/> exactly once when done (on
+    /// dispose), and the protector is guaranteed to stay undisposed until
+    /// then even across <see cref="RotateProcessKey"/>.
     /// </summary>
-    internal static KeyAtRestProtector GetOrInitProcessProtector() => GetOrInitProtectorUnlocked();
+    internal static KeyAtRestProtector GetOrInitProcessProtector() => SnapshotProtectorWithRef();
 
     private static KeyAtRestProtector GetOrInitProtectorLocked()
     {
@@ -367,7 +442,21 @@ public sealed class ProtectedString : IDisposable, IEquatable<ProtectedString>
     /// </remarks>
     /// <exception cref="ObjectDisposedException">The instance has been disposed.</exception>
     /// <exception cref="InvalidOperationException">The instance is read-only.</exception>
-    public void AppendChar(char c)
+    public void AppendChar(char c) => AppendChars([c]);
+
+    /// <summary>
+    /// Appends every character of <paramref name="value"/> — the bulk
+    /// sibling of <see cref="AppendChar"/>, paying one capacity check and
+    /// one copy for the whole span instead of per-character calls.
+    /// </summary>
+    /// <remarks>
+    /// Same build-mode semantics and trade-off as <see cref="AppendChar"/>:
+    /// the plaintext lives in the pinned, locked, dump-excluded build buffer
+    /// until the next <see cref="MakeReadOnly"/> commits it to ciphertext.
+    /// </remarks>
+    /// <exception cref="ObjectDisposedException">The instance has been disposed.</exception>
+    /// <exception cref="InvalidOperationException">The instance is read-only.</exception>
+    public void AppendChars(ReadOnlySpan<char> value)
     {
         lock (_sync)
         {
@@ -376,23 +465,46 @@ public sealed class ProtectedString : IDisposable, IEquatable<ProtectedString>
             {
                 throw new InvalidOperationException("ProtectedString is read-only.");
             }
+            if (value.IsEmpty) return;
 
-            // Lift from ciphertext into the build buffer on the first
-            // AppendChar after construction. Subsequent calls just write to
-            // the buffer (growing geometrically when capacity is exhausted).
+            // Lift from ciphertext into the build buffer on the first append
+            // after construction. Subsequent calls just write to the buffer
+            // (growing geometrically when capacity is exhausted).
+            int required = checked(_length + value.Length);
             if (_buildBuffer is null)
             {
-                LiftIntoBuildBuffer(_length + 1);
+                LiftIntoBuildBuffer(required);
             }
-            else if (_length == _buildBuffer.Length)
+            else if (required > _buildBuffer.Length)
             {
-                GrowBuildBuffer(_buildBuffer.Length == 0
-                    ? BuildBufferInitialCapacity
-                    : checked(_buildBuffer.Length * 2));
+                if (value.Overlaps(_buildBuffer))
+                {
+                    // The source aliases the live build buffer (a reentrant
+                    // Access handler appending the plaintext to itself), and
+                    // growth wipes the old buffer before the copy below would
+                    // read it — stage the source in pooled scratch first.
+                    var stage = LockedScratchPool.Rent(checked(value.Length * 2));
+                    try
+                    {
+                        var copy = stage.Chars(value.Length);
+                        value.CopyTo(copy);
+                        GrowBuildBuffer(Math.Max(required, checked(_buildBuffer.Length * 2)));
+                        copy.CopyTo(_buildBuffer.AsSpan(_length));
+                        _length = required;
+                        return;
+                    }
+                    finally
+                    {
+                        stage.Return();
+                    }
+                }
+                GrowBuildBuffer(Math.Max(required, checked(_buildBuffer.Length * 2)));
             }
 
-            _buildBuffer![_length] = c;
-            _length++;
+            // Same-array overlap without growth is safe: Span.CopyTo has
+            // memmove semantics.
+            value.CopyTo(_buildBuffer.AsSpan(_length));
+            _length = required;
         }
     }
 
@@ -410,20 +522,16 @@ public sealed class ProtectedString : IDisposable, IEquatable<ProtectedString>
 
         if (_length > 0)
         {
-            char[]? plain = null;
             try
             {
-                plain = DecryptUnsafe();
-                plain.AsSpan(0, _length).CopyTo(buffer);
+                // Decrypt straight into the front of the new build buffer —
+                // no intermediate copy.
+                DecryptInto(buffer.AsSpan(0, _length));
             }
             catch
             {
                 ZeroChars(buffer);
                 throw;
-            }
-            finally
-            {
-                if (plain is not null) ZeroChars(plain);
             }
         }
 
@@ -499,21 +607,14 @@ public sealed class ProtectedString : IDisposable, IEquatable<ProtectedString>
         lock (_sync)
         {
             ThrowIfDisposed();
-            if (_buildBuffer is not null)
-            {
-                handler(_buildBuffer.AsSpan(0, _length));
-                return;
-            }
-
-            char[]? plain = null;
+            LockedScratchPool.Lease? lease = null;
             try
             {
-                plain = _length == 0 ? Array.Empty<char>() : DecryptUnsafe();
-                handler(plain.AsSpan(0, _length));
+                handler(RentPlaintextLocked(out lease));
             }
             finally
             {
-                if (plain is { Length: > 0 }) ZeroChars(plain);
+                lease?.Return();
             }
         }
     }
@@ -530,20 +631,14 @@ public sealed class ProtectedString : IDisposable, IEquatable<ProtectedString>
         lock (_sync)
         {
             ThrowIfDisposed();
-            if (_buildBuffer is not null)
-            {
-                return handler(_buildBuffer.AsSpan(0, _length));
-            }
-
-            char[]? plain = null;
+            LockedScratchPool.Lease? lease = null;
             try
             {
-                plain = _length == 0 ? Array.Empty<char>() : DecryptUnsafe();
-                return handler(plain.AsSpan(0, _length));
+                return handler(RentPlaintextLocked(out lease));
             }
             finally
             {
-                if (plain is { Length: > 0 }) ZeroChars(plain);
+                lease?.Return();
             }
         }
     }
@@ -621,6 +716,12 @@ public sealed class ProtectedString : IDisposable, IEquatable<ProtectedString>
     /// <paramref name="destination"/> is shorter than <see cref="Length"/>.
     /// </exception>
     /// <exception cref="ObjectDisposedException">The instance has been disposed.</exception>
+    /// <exception cref="System.Security.Cryptography.CryptographicException">
+    /// The stored ciphertext failed authentication. Decryption happens
+    /// directly into <paramref name="destination"/> (no intermediate copy),
+    /// so on failure the written region is cleared — or, on the browser TFM,
+    /// left untouched — rather than preserved.
+    /// </exception>
     /// <remarks>
     /// Useful when the consumer needs the plaintext as a contiguous
     /// <c>Span&lt;char&gt;</c> they can pass to UTF-16-friendly APIs (e.g.
@@ -649,17 +750,11 @@ public sealed class ProtectedString : IDisposable, IEquatable<ProtectedString>
                 return _length;
             }
 
-            char[]? plain = null;
-            try
-            {
-                plain = DecryptUnsafe();
-                plain.AsSpan(0, _length).CopyTo(destination);
-                return _length;
-            }
-            finally
-            {
-                if (plain is not null) ZeroChars(plain);
-            }
+            // Decrypt straight into the caller's span — no intermediate
+            // buffer at all. The caller owns the destination's wipe; on a
+            // tag-check failure the runtime clears it before throwing.
+            DecryptInto(destination[.._length]);
+            return _length;
         }
     }
 
@@ -696,7 +791,7 @@ public sealed class ProtectedString : IDisposable, IEquatable<ProtectedString>
     /// <see cref="System.Net.Security.SslStream"/> all satisfy this on
     /// .NET); if you must wrap a short-writing stream, do the
     /// loop-until-done dance in your own wrapper before calling
-    /// <see cref="WriteUtf8To"/>. Keeping the loop out of the library
+    /// <see cref="WriteUtf8To(Stream)"/>. Keeping the loop out of the library
     /// keeps the wipe-on-exit window deterministic.
     /// </para>
     /// </remarks>
@@ -713,23 +808,18 @@ public sealed class ProtectedString : IDisposable, IEquatable<ProtectedString>
             ThrowIfDisposed();
             if (_length == 0) return 0;
 
+            LockedScratchPool.Lease? lease = null;
             byte[]? bytes = null;
-            char[]? plain = null;
             try
             {
-                ReadOnlySpan<char> source;
-                if (_buildBuffer is not null)
-                {
-                    source = _buildBuffer.AsSpan(0, _length);
-                }
-                else
-                {
-                    plain = DecryptUnsafe();
-                    source = plain.AsSpan(0, _length);
-                }
+                ReadOnlySpan<char> source = RentPlaintextLocked(out lease);
 
+                // The UTF-8 staging stays a dedicated array (not pooled
+                // scratch): it is handed to an arbitrary Stream
+                // implementation, and a stream that captured a pooled slab
+                // reference could read every future secret staged there.
                 int byteCount = Encoding.UTF8.GetByteCount(source);
-                bytes = AllocatePinnedBytes(byteCount);
+                bytes = AllocatePinnedBytes(byteCount, excludeFromDumps: true);
                 int written = Encoding.UTF8.GetBytes(source, bytes);
                 Debug.Assert(written == byteCount);
                 destination.Write(bytes, 0, written);
@@ -737,8 +827,133 @@ public sealed class ProtectedString : IDisposable, IEquatable<ProtectedString>
             }
             finally
             {
-                if (plain is not null) ZeroChars(plain);
+                lease?.Return();
                 if (bytes is not null) ZeroBytes(bytes);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Encodes the plaintext as UTF-8 directly into
+    /// <paramref name="destination"/>'s buffer via
+    /// <see cref="IBufferWriter{T}.GetSpan(int)"/> — no intermediate copy at
+    /// all.
+    /// </summary>
+    /// <returns>The number of UTF-8 bytes written.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="destination"/> is null.</exception>
+    /// <exception cref="ObjectDisposedException">The instance has been disposed.</exception>
+    /// <remarks>
+    /// The library's wipe guarantee ends at the writer boundary: an
+    /// <see cref="IBufferWriter{T}"/>'s backing memory (often an
+    /// <c>ArrayPool</c> rental) is owned by the writer and is <b>not</b>
+    /// wiped by this method — the same contract as
+    /// <see cref="WriteUtf8To(Stream)"/>'s stream boundary. Use a writer
+    /// whose lifecycle you control and clear it after the bytes have been
+    /// consumed.
+    /// </remarks>
+    public int WriteUtf8To(IBufferWriter<byte> destination)
+    {
+        ArgumentNullException.ThrowIfNull(destination);
+        lock (_sync)
+        {
+            ThrowIfDisposed();
+            if (_length == 0) return 0;
+
+            LockedScratchPool.Lease? lease = null;
+            try
+            {
+                ReadOnlySpan<char> source = RentPlaintextLocked(out lease);
+                int byteCount = Encoding.UTF8.GetByteCount(source);
+                var span = destination.GetSpan(byteCount);
+                int written = Encoding.UTF8.GetBytes(source, span);
+                Debug.Assert(written == byteCount);
+                destination.Advance(written);
+                return written;
+            }
+            finally
+            {
+                lease?.Return();
+            }
+        }
+    }
+
+    /// <summary>
+    /// Invokes <paramref name="handler"/> with the plaintext encoded as
+    /// UTF-8 over pinned, locked, dump-excluded scratch that is wiped when
+    /// the call returns — the byte-oriented sibling of
+    /// <see cref="Access(ReadOnlySpanAction{char})"/>.
+    /// </summary>
+    /// <remarks>
+    /// For consumers that need bytes rather than characters — HTTP Basic
+    /// credentials, key-derivation inputs, <c>Utf8JsonWriter</c> values.
+    /// Prefer this over hand-encoding inside an <c>Access</c> callback: the
+    /// encoding target here is locked scratch with a guaranteed wipe, and the
+    /// <see cref="ReadOnlySpan{T}"/> is a <c>ref struct</c> the compiler
+    /// refuses to let escape.
+    /// </remarks>
+    /// <exception cref="ObjectDisposedException">The instance has been disposed.</exception>
+    public void Utf8Access(ReadOnlySpanAction<byte> handler)
+    {
+        ArgumentNullException.ThrowIfNull(handler);
+        lock (_sync)
+        {
+            ThrowIfDisposed();
+            LockedScratchPool.Lease? lease = null;
+            LockedScratchPool.Lease? utf8Lease = null;
+            try
+            {
+                ReadOnlySpan<char> source = RentPlaintextLocked(out lease);
+                int byteCount = Encoding.UTF8.GetByteCount(source);
+                if (byteCount == 0)
+                {
+                    handler(ReadOnlySpan<byte>.Empty);
+                    return;
+                }
+                utf8Lease = LockedScratchPool.Rent(byteCount);
+                var bytes = utf8Lease.Bytes(byteCount);
+                int written = Encoding.UTF8.GetBytes(source, bytes);
+                Debug.Assert(written == byteCount);
+                handler(bytes);
+            }
+            finally
+            {
+                utf8Lease?.Return();
+                lease?.Return();
+            }
+        }
+    }
+
+    /// <summary>
+    /// Like <see cref="Utf8Access(ReadOnlySpanAction{byte})"/>, but
+    /// <paramref name="handler"/>'s return value is propagated to the caller.
+    /// </summary>
+    /// <exception cref="ObjectDisposedException">The instance has been disposed.</exception>
+    public T Utf8Access<T>(ReadOnlySpanFunc<byte, T> handler)
+    {
+        ArgumentNullException.ThrowIfNull(handler);
+        lock (_sync)
+        {
+            ThrowIfDisposed();
+            LockedScratchPool.Lease? lease = null;
+            LockedScratchPool.Lease? utf8Lease = null;
+            try
+            {
+                ReadOnlySpan<char> source = RentPlaintextLocked(out lease);
+                int byteCount = Encoding.UTF8.GetByteCount(source);
+                if (byteCount == 0)
+                {
+                    return handler(ReadOnlySpan<byte>.Empty);
+                }
+                utf8Lease = LockedScratchPool.Rent(byteCount);
+                var bytes = utf8Lease.Bytes(byteCount);
+                int written = Encoding.UTF8.GetBytes(source, bytes);
+                Debug.Assert(written == byteCount);
+                return handler(bytes);
+            }
+            finally
+            {
+                utf8Lease?.Return();
+                lease?.Return();
             }
         }
     }
@@ -750,20 +965,16 @@ public sealed class ProtectedString : IDisposable, IEquatable<ProtectedString>
         lock (_sync)
         {
             ThrowIfDisposed();
-            if (_buildBuffer is not null)
-            {
-                // No decrypt needed — plaintext lives in the build buffer.
-                return new ProtectedString(_buildBuffer.AsSpan(0, _length));
-            }
-            char[]? plain = null;
+            LockedScratchPool.Lease? lease = null;
             try
             {
-                plain = DecryptUnsafe();
-                return new ProtectedString(plain.AsSpan(0, _length));
+                // The constructor copies the span immediately, so pooled
+                // scratch never outlives this frame.
+                return new ProtectedString(RentPlaintextLocked(out lease));
             }
             finally
             {
-                if (plain is { Length: > 0 }) ZeroChars(plain);
+                lease?.Return();
             }
         }
     }
@@ -802,20 +1013,20 @@ public sealed class ProtectedString : IDisposable, IEquatable<ProtectedString>
                 if (_disposed || other._disposed) return false;
                 if (_length != other._length) return false;
 
-                char[]? a = null;
-                char[]? b = null;
+                LockedScratchPool.Lease? leaseA = null;
+                LockedScratchPool.Lease? leaseB = null;
                 try
                 {
-                    a = MaterializePlaintext();
-                    b = other.MaterializePlaintext();
+                    var a = RentPlaintextLocked(out leaseA);
+                    var b = other.RentPlaintextLocked(out leaseB);
                     return CryptographicOperations.FixedTimeEquals(
-                        MemoryMarshal.AsBytes(a.AsSpan(0, _length)),
-                        MemoryMarshal.AsBytes(b.AsSpan(0, other._length)));
+                        MemoryMarshal.AsBytes(a),
+                        MemoryMarshal.AsBytes(b));
                 }
                 finally
                 {
-                    if (a is { Length: > 0 }) ZeroChars(a);
-                    if (b is { Length: > 0 }) ZeroChars(b);
+                    leaseA?.Return();
+                    leaseB?.Return();
                 }
             }
         }
@@ -876,14 +1087,17 @@ public sealed class ProtectedString : IDisposable, IEquatable<ProtectedString>
         lock (_sync)
         {
             ThrowIfDisposed();
-            char[]? plain = null;
+            LockedScratchPool.Lease? lease = null;
             byte[]? bytes = null;
             try
             {
-                plain = MaterializePlaintext();
-                int byteCount = Encoding.UTF8.GetByteCount(plain, 0, _length);
-                bytes = AllocatePinnedBytes(byteCount);
-                Encoding.UTF8.GetBytes(plain, 0, _length, bytes, 0);
+                ReadOnlySpan<char> plain = RentPlaintextLocked(out lease);
+                int byteCount = Encoding.UTF8.GetByteCount(plain);
+                // Dedicated array (not pooled scratch): Argon2id's constructor
+                // requires a real byte[] and the reference crosses into the
+                // external KDF implementation.
+                bytes = AllocatePinnedBytes(byteCount, excludeFromDumps: true);
+                Encoding.UTF8.GetBytes(plain, bytes);
 
                 using var argon = new Argon2id(bytes)
                 {
@@ -896,7 +1110,7 @@ public sealed class ProtectedString : IDisposable, IEquatable<ProtectedString>
             }
             finally
             {
-                if (plain is { Length: > 0 }) ZeroChars(plain);
+                lease?.Return();
                 if (bytes is { Length: > 0 }) ZeroBytes(bytes);
             }
         }
@@ -961,9 +1175,9 @@ public sealed class ProtectedString : IDisposable, IEquatable<ProtectedString>
     private void DisposeUnlocked()
     {
         if (_disposed) return;
-        ZeroBytes(_ciphertext);
-        ZeroBytes(_nonce);
-        ZeroBytes(_tag);
+        ZeroOnly(_ciphertext);
+        ZeroOnly(_nonce);
+        ZeroOnly(_tag);
         if (_buildBuffer is { Length: > 0 }) ZeroChars(_buildBuffer);
         _ciphertext = null;
         _nonce = null;
@@ -971,6 +1185,14 @@ public sealed class ProtectedString : IDisposable, IEquatable<ProtectedString>
         _buildBuffer = null;
         _length = 0;
         _disposed = true;
+        // Runs at most once (guarded by _disposed above) from Dispose or the
+        // finalizer; ProtectorLifetime is Interlocked-based and safe on the
+        // finalizer thread. Null only if the constructor threw before
+        // InitInstance completed.
+        if (_instanceProtector is not null)
+        {
+            ProtectorLifetime.Release(_instanceProtector);
+        }
     }
 
     // ---- process-key rotation -------------------------------------------
@@ -978,8 +1200,15 @@ public sealed class ProtectedString : IDisposable, IEquatable<ProtectedString>
     /// <summary>
     /// Generates a fresh master AES key, swaps it in as the current process
     /// protector, and re-encrypts every live <see cref="ProtectedString"/>
-    /// under the new key. The previous master is zeroed once every live
-    /// instance has been migrated.
+    /// under the new key. The superseded protector is disposed — its master
+    /// zeroed, any hardware-backed transient slot released — as soon as its
+    /// last holder lets go (tracked by <see cref="ProtectorLifetime"/>); when
+    /// every live instance migrates successfully and nothing else references
+    /// it, that happens before this method returns. Holders that outlive the
+    /// rotation (failed migrations, instances constructed under a
+    /// <see cref="ProcessKeyRotation.Disabled"/> policy, and
+    /// <c>ProtectedBlob</c> instances, which rotation never re-encrypts)
+    /// keep the old protector alive until they are disposed.
     /// </summary>
     /// <exception cref="InvalidOperationException">
     /// <see cref="ProtectedStringOptions.ProcessKeyRotationPolicy"/> is
@@ -1061,6 +1290,13 @@ public sealed class ProtectedString : IDisposable, IEquatable<ProtectedString>
                     s_liveInstances.RemoveAt(i);
                 }
             }
+
+            // From this point no new holder can acquire oldProtector (the
+            // swap above is visible before ProtectorLifetime's full-fence
+            // count read — see SnapshotProtectorWithRef). Mark it rotated
+            // out; ProtectorLifetime disposes it the moment the holder count
+            // hits zero.
+            ProtectorLifetime.MarkSuperseded(oldProtector);
         }
 
         // Outside the rotation lock — migrate one instance at a time. Each
@@ -1082,19 +1318,16 @@ public sealed class ProtectedString : IDisposable, IEquatable<ProtectedString>
             }
         }
 
-        // Note: the old protector is intentionally not disposed here. Instances
-        // created when the rotation policy was Disabled are not in the registry
-        // and may still hold a reference to oldProtector via _instanceProtector;
-        // disposing would invalidate decrypts on them. The old protector becomes
-        // unreachable (and reclaimable by the GC) once every instance referencing
-        // it is itself disposed. A refcount that ticks down as instances
-        // re-encrypt would let us dispose old TPM-backed protectors
-        // deterministically and avoid the transient-slot exhaustion path; we
-        // shipped the cheaper mitigations instead — a finalizer on each
-        // TPM protector, plus the one-shot warning emitted by
-        // EmitTransientSlotRotationWarning when Periodic rotation is paired
-        // with a transient-slot-constrained provider. Revisit if a consumer
-        // reports TPM_RC_RESOURCES in practice.
+        // The old protector was marked superseded above; ProtectorLifetime
+        // disposes it (zeroing its master, releasing any TPM / Secure
+        // Element transient slot) the moment its holder count reaches zero.
+        // For a fully successful pass over registry-tracked instances that
+        // already happened inside the loop, when the last migrated instance
+        // released its reference. Holders that keep the old protector alive
+        // longer — instances that failed to migrate, instances constructed
+        // while the policy was Disabled (not in the registry), and
+        // ProtectedBlob instances (rotation never re-encrypts blobs) — delay
+        // disposal exactly as long as something can still decrypt through it.
         if (failed > 0)
         {
             Trace.TraceWarning(
@@ -1114,6 +1347,7 @@ public sealed class ProtectedString : IDisposable, IEquatable<ProtectedString>
         {
             if (_disposed) return;
             if (ReferenceEquals(_instanceProtector, newProtector)) return;
+            var old = _instanceProtector;
 
             // In build mode the plaintext lives in _buildBuffer rather than in
             // ciphertext under the old protector. There is no encrypted state
@@ -1121,21 +1355,37 @@ public sealed class ProtectedString : IDisposable, IEquatable<ProtectedString>
             // CommitBuildBuffer (e.g. via MakeReadOnly) encrypts under it.
             if (_buildBuffer is not null)
             {
+                ProtectorLifetime.AddRef(newProtector);
                 _instanceProtector = newProtector;
+                ProtectorLifetime.Release(old);
                 return;
             }
 
-            char[]? plain = null;
+            LockedScratchPool.Lease? lease = null;
             try
             {
-                plain = _length == 0 ? Array.Empty<char>() : DecryptUnsafe();
+                var plain = RentPlaintextLocked(out lease);
+                ProtectorLifetime.AddRef(newProtector);
                 _instanceProtector = newProtector;
-                EncryptInternal(plain.AsSpan(0, _length));
+                try
+                {
+                    EncryptInternal(plain);
+                }
+                catch
+                {
+                    // Roll the swap back: the ciphertext is still under the
+                    // old key, so leaving the new protector installed would
+                    // fail every subsequent decrypt with a tag mismatch.
+                    _instanceProtector = old;
+                    ProtectorLifetime.Release(newProtector);
+                    throw;
+                }
             }
             finally
             {
-                if (plain is { Length: > 0 }) ZeroChars(plain);
+                lease?.Return();
             }
+            ProtectorLifetime.Release(old);
         }
     }
 
@@ -1191,20 +1441,27 @@ public sealed class ProtectedString : IDisposable, IEquatable<ProtectedString>
     /// <summary>
     /// Periodic rotation creates a fresh master each cycle; hardware-backed
     /// providers built on top of transient secure-element slots (TPM 2.0 in
-    /// particular — commodity TPMs hold ≤3 transient keys) can run out
-    /// after a few cycles because the orphaned old protectors only release
-    /// their slots on GC / finalizer. Emit a one-shot warning so the
-    /// operator notices before <c>TPM_RC_RESOURCES</c> starts surfacing.
+    /// particular — commodity TPMs hold ≤3 transient keys) can still run out
+    /// when holders pin superseded protectors across several cycles.
+    /// <see cref="ProtectorLifetime"/> releases a superseded protector's slot
+    /// deterministically once its last holder migrates or is disposed, so a
+    /// clean migration pass frees the slot within the rotation itself — the
+    /// residual risk is long-lived <c>ProtectedBlob</c> instances (rotation
+    /// never re-encrypts blobs) and failed migrations. Emit a one-shot
+    /// warning so the operator knows what to watch for before
+    /// <c>TPM_RC_RESOURCES</c> starts surfacing.
     /// </summary>
     private static void EmitTransientSlotRotationWarning()
     {
         Trace.TraceWarning(
             "ProtectedString: ProcessKeyRotation.Periodic with a transient-slot-constrained " +
-            "hardware-backed provider (e.g. Windows TPM) will accumulate orphaned secure-element " +
-            "keys until the GC finalises them. Long-running services rotating frequently can " +
-            "exhaust TPM transient slots (commodity TPMs hold ≤3) and start failing with " +
-            "TPM_RC_RESOURCES. Reduce ProcessKeyRotationInterval, switch to ProcessKeyRotation.OnDemand, " +
-            "or use KeyAtRestProtection.Obscurity / None if rotation cadence is the priority.");
+            "hardware-backed provider (e.g. Windows TPM). Superseded masters release their " +
+            "secure-element slot as soon as the last instance encrypted under them migrates or " +
+            "is disposed — but long-lived ProtectedBlob instances (never re-encrypted by " +
+            "rotation) and failed migrations pin old slots across cycles. Commodity TPMs hold " +
+            "≤3 transient keys, so pinned slots can surface as TPM_RC_RESOURCES; if blobs " +
+            "routinely outlive several rotation intervals, reduce the rotation cadence, " +
+            "dispose and rebuild blobs periodically, or use KeyAtRestProtection.Obscurity / None.");
     }
 
     // ---- internals -------------------------------------------------------
@@ -1236,55 +1493,90 @@ public sealed class ProtectedString : IDisposable, IEquatable<ProtectedString>
     /// returned buffer with <see cref="ZeroChars(char[])"/>.
     /// </summary>
     /// <remarks>
-    /// Used by the obsolete <c>Access(Action&lt;char[]&gt;)</c> family —
-    /// which has to hand out a heap-allocated <c>char[]</c> the caller
-    /// might mutate or capture — and by <see cref="Copy"/> /
-    /// <see cref="Equals(ProtectedString)"/> /
-    /// <see cref="ComputeArgon2idHash"/>. The new
-    /// <see cref="Access(ReadOnlySpanAction{char})"/> overloads bypass
-    /// this helper and read the build buffer span directly.
+    /// Used only by the obsolete <c>Access(Action&lt;char[]&gt;)</c> family,
+    /// which has to hand out a heap-allocated <c>char[]</c> the caller might
+    /// mutate or capture — that is exactly why this path cannot use
+    /// <see cref="LockedScratchPool"/>: a captured pooled-slab reference
+    /// would alias every future secret staged in that slab. Every internal
+    /// consumer rents pooled scratch via
+    /// <see cref="RentPlaintextLocked"/> instead.
     /// </remarks>
     private char[] MaterializePlaintext()
     {
         if (_length == 0) return Array.Empty<char>();
+
+        var dst = AllocatePinnedChars(_length);
         if (_buildBuffer is not null)
         {
-            var dst = AllocatePinnedChars(_length);
             _buildBuffer.AsSpan(0, _length).CopyTo(dst);
             return dst;
         }
-        return DecryptUnsafe();
-    }
 
-    /// <summary>
-    /// Decrypts the stored ciphertext into a freshly allocated, pinned
-    /// <see cref="char"/> array of length <see cref="_length"/>.
-    /// Caller is responsible for zeroing the returned array.
-    /// </summary>
-    private char[] DecryptUnsafe()
-    {
-        Debug.Assert(_ciphertext is not null && _nonce is not null && _tag is not null);
-
-        if (_length == 0)
-        {
-            return Array.Empty<char>();
-        }
-
-        char[] chars = AllocatePinnedChars(_length);
         bool ok = false;
         try
         {
-            Span<byte> aad = stackalloc byte[sizeof(long)];
-            BinaryPrimitives.WriteInt64LittleEndian(aad, _instanceId);
-
-            using var keyAccess = _instanceProtector.UnwrapKey();
-            AesGcmShim.Decrypt(keyAccess.Key, _nonce!, _ciphertext!, _tag!, MemoryMarshal.AsBytes(chars.AsSpan()), aad);
+            DecryptInto(dst);
             ok = true;
-            return chars;
+            return dst;
         }
         finally
         {
-            if (!ok) ZeroChars(chars);
+            if (!ok) ZeroChars(dst);
+        }
+    }
+
+    /// <summary>
+    /// Decrypts the stored ciphertext into <paramref name="destination"/>,
+    /// which must be exactly <see cref="_length"/> characters. Caller holds
+    /// <see cref="_sync"/> and owns the destination's wipe discipline. On a
+    /// tag-check failure the runtime clears the destination before throwing.
+    /// </summary>
+    private void DecryptInto(Span<char> destination)
+    {
+        Debug.Assert(_ciphertext is not null && _nonce is not null && _tag is not null);
+        Debug.Assert(destination.Length == _length);
+
+        Span<byte> aad = stackalloc byte[sizeof(long)];
+        BinaryPrimitives.WriteInt64LittleEndian(aad, _instanceId);
+
+        using var keyAccess = _instanceProtector.UnwrapKey();
+        AesGcmShim.Decrypt(keyAccess.Key, _nonce!, _ciphertext!, _tag!, MemoryMarshal.AsBytes(destination), aad);
+    }
+
+    /// <summary>
+    /// Hands back this instance's plaintext as a span: the live build-buffer
+    /// span in build mode, an empty span for a zero-length value, or pooled
+    /// locked scratch (<see cref="LockedScratchPool"/>) filled via
+    /// <see cref="DecryptInto"/> otherwise. Caller holds <see cref="_sync"/>
+    /// and must <c>Return()</c> the lease (when non-<see langword="null"/>)
+    /// in a <c>finally</c>. The span must never escape to caller-supplied
+    /// code as an array — pooled chunks share slabs with other secrets.
+    /// </summary>
+    private ReadOnlySpan<char> RentPlaintextLocked(out LockedScratchPool.Lease? lease)
+    {
+        if (_buildBuffer is not null)
+        {
+            lease = null;
+            return _buildBuffer.AsSpan(0, _length);
+        }
+        if (_length == 0)
+        {
+            lease = null;
+            return ReadOnlySpan<char>.Empty;
+        }
+
+        var rented = LockedScratchPool.Rent(checked(_length * 2));
+        try
+        {
+            var chars = rented.Chars(_length);
+            DecryptInto(chars);
+            lease = rented;
+            return chars;
+        }
+        catch
+        {
+            rented.Return();
+            throw;
         }
     }
 
@@ -1296,25 +1588,24 @@ public sealed class ProtectedString : IDisposable, IEquatable<ProtectedString>
 
         int byteLen = checked(plain.Length * 2);
 
-        // Allocate (and lock) the new state up front. If anything in here
-        // throws — e.g., the configured policy is Throw and a lock failed —
-        // the existing instance state is still intact and the just-allocated
+        // Allocate the new state up front. If anything in here throws, the
+        // existing instance state is still intact and the just-allocated
         // buffers are torn down in the finally below.
         byte[]? newNonce = null;
         byte[]? newTag = null;
         byte[]? newCiphertext = null;
-        byte[]? plainBytes = null;
+        LockedScratchPool.Lease? plainLease = null;
         bool committed = false;
         try
         {
-            newNonce = AllocatePinnedBytes(NonceSize);
-            newTag = AllocatePinnedBytes(TagSize);
+            newNonce = AllocatePinnedEncryptedState(NonceSize);
+            newTag = AllocatePinnedEncryptedState(TagSize);
             // Always pin the ciphertext array — even at length 0 — so the
             // invariant "all encrypted state is POH-resident" holds without
             // exception. The empty case used to alias Array.Empty<byte>() (a
             // runtime-shared, non-pinned singleton); that broke the invariant
             // the rest of the type documents.
-            newCiphertext = AllocatePinnedBytes(byteLen);
+            newCiphertext = AllocatePinnedEncryptedState(byteLen);
 
             RandomNumberGenerator.Fill(newNonce);
 
@@ -1332,19 +1623,20 @@ public sealed class ProtectedString : IDisposable, IEquatable<ProtectedString>
             }
             else
             {
-                // Stage the plaintext bytes in a pinned, locked buffer so the
-                // GC cannot relocate (and copy) the unencrypted material before
-                // we zero it.
-                plainBytes = AllocatePinnedBytes(byteLen);
-                MemoryMarshal.AsBytes(plain).CopyTo(plainBytes);
+                // Stage the plaintext bytes in pooled locked scratch so the
+                // GC cannot relocate (and copy) the unencrypted material
+                // before the lease wipes it on return.
+                plainLease = LockedScratchPool.Rent(byteLen);
+                var staging = plainLease.Bytes(byteLen);
+                MemoryMarshal.AsBytes(plain).CopyTo(staging);
                 using var keyAccess = _instanceProtector.UnwrapKey();
-                AesGcmShim.Encrypt(keyAccess.Key, newNonce, plainBytes, newCiphertext, newTag, aad);
+                AesGcmShim.Encrypt(keyAccess.Key, newNonce, staging, newCiphertext, newTag, aad);
             }
 
             // Commit: tear down old state, install new.
-            ZeroBytes(_ciphertext);
-            ZeroBytes(_nonce);
-            ZeroBytes(_tag);
+            ZeroOnly(_ciphertext);
+            ZeroOnly(_nonce);
+            ZeroOnly(_tag);
             _nonce = newNonce;
             _tag = newTag;
             _ciphertext = newCiphertext;
@@ -1354,15 +1646,40 @@ public sealed class ProtectedString : IDisposable, IEquatable<ProtectedString>
         finally
         {
             // Always wipe the staging plaintext.
-            if (plainBytes is not null) ZeroBytes(plainBytes);
-            // On failure, also wipe the not-yet-installed state so we do not
-            // leak a locked-but-orphaned buffer's lock count to the OS.
+            plainLease?.Return();
+            // On failure, also wipe the not-yet-installed state.
             if (!committed)
             {
-                if (newNonce is not null) ZeroBytes(newNonce);
-                if (newTag is not null) ZeroBytes(newTag);
-                if (newCiphertext is not null) ZeroBytes(newCiphertext);
+                ZeroOnly(newNonce);
+                ZeroOnly(newTag);
+                ZeroOnly(newCiphertext);
             }
+        }
+    }
+
+    /// <summary>
+    /// Allocates a pinned array for encrypted state (ciphertext / nonce /
+    /// tag). Deliberately <b>not</b> locked or dump-excluded: the contents
+    /// are safe to swap or dump by construction, and keeping these high-churn
+    /// buffers off the page-granular, non-refcounted lock/unlock path removes
+    /// their interference with pages legitimately locked for plaintext and
+    /// key material.
+    /// </summary>
+    internal static byte[] AllocatePinnedEncryptedState(int length) =>
+        GC.AllocateArray<byte>(length, pinned: true);
+
+    /// <summary>
+    /// Wipes encrypted state without the unlock / dump re-include step —
+    /// these buffers are never locked (see
+    /// <see cref="AllocatePinnedEncryptedState"/>), and an <c>munlock</c> on
+    /// their pages could drop a lock legitimately held by a neighbouring
+    /// locked buffer.
+    /// </summary>
+    internal static void ZeroOnly(byte[]? buffer)
+    {
+        if (buffer is { Length: > 0 })
+        {
+            CryptographicOperations.ZeroMemory(buffer);
         }
     }
 
@@ -1372,15 +1689,23 @@ public sealed class ProtectedString : IDisposable, IEquatable<ProtectedString>
     /// <see cref="ProtectedStringOptions.MemoryLockingFailureBehavior"/> is
     /// applied via <see cref="HardeningPolicy.OnFailure(string)"/>.
     /// </summary>
-    internal static byte[] AllocatePinnedBytes(int length)
-    {
-        var buffer = GC.AllocateArray<byte>(length, pinned: true);
-        if (length > 0 && !MemoryLocker.TryLock(buffer))
-        {
-            HardeningPolicy.OnFailure("memory locking");
-        }
-        return buffer;
-    }
+    /// <param name="length">Number of bytes to allocate.</param>
+    /// <param name="excludeFromDumps">
+    /// <see langword="true"/> for buffers that will hold plaintext or key
+    /// material — the buffer is additionally excluded from OS crash dumps via
+    /// <see cref="DumpExclusion"/> where the platform supports it. Ciphertext,
+    /// nonce, and tag buffers pass <see langword="false"/>: their contents are
+    /// already safe to dump, and on Windows each exclusion consumes one of
+    /// WER's 512 registration slots.
+    /// </param>
+    /// <param name="lockContext">
+    /// Noun phrase interpolated into the policy failure for the lock step —
+    /// lets protector call sites keep their site-specific messages while
+    /// sharing this one allocate/lock/exclude implementation.
+    /// </param>
+    internal static byte[] AllocatePinnedBytes(
+        int length, bool excludeFromDumps = false, string lockContext = "memory locking") =>
+        AllocatePinnedCore<byte>(length, excludeFromDumps, lockContext);
 
     /// <summary>
     /// Allocates a pinned <see cref="char"/> array and locks it into resident
@@ -1388,12 +1713,34 @@ public sealed class ProtectedString : IDisposable, IEquatable<ProtectedString>
     /// <see cref="ProtectedStringOptions.MemoryLockingFailureBehavior"/> is
     /// applied via <see cref="HardeningPolicy.OnFailure(string)"/>.
     /// </summary>
-    private static char[] AllocatePinnedChars(int length)
+    private static char[] AllocatePinnedChars(int length) =>
+        // Every char[] this type allocates holds plaintext (build buffer,
+        // decrypt scratch, materialized copies) — always dump-exclude.
+        AllocatePinnedCore<char>(length, excludeFromDumps: true, lockContext: "memory locking");
+
+    private static T[] AllocatePinnedCore<T>(int length, bool excludeFromDumps, string lockContext)
+        where T : unmanaged
     {
-        var buffer = GC.AllocateArray<char>(length, pinned: true);
+        var buffer = GC.AllocateArray<T>(length, pinned: true);
         if (length > 0 && !MemoryLocker.TryLock(buffer))
         {
-            HardeningPolicy.OnFailure("memory locking");
+            HardeningPolicy.OnFailure(lockContext);
+        }
+        if (excludeFromDumps && length > 0 && !DumpExclusion.TryExclude(buffer))
+        {
+            try
+            {
+                HardeningPolicy.OnFailure("core-dump exclusion");
+            }
+            catch
+            {
+                // Throw policy: GC reclaim does not munlock — release the
+                // lock before surfacing, or every retried operation leaks
+                // locked pages until the RLIMIT_MEMLOCK / working-set budget
+                // is gone.
+                MemoryLocker.TryUnlock(buffer);
+                throw;
+            }
         }
         return buffer;
     }
@@ -1405,10 +1752,17 @@ public sealed class ProtectedString : IDisposable, IEquatable<ProtectedString>
     /// <see cref="AllocatePinnedBytes"/>.
     /// </summary>
     /// <remarks>
-    /// Known residual: <c>VirtualLock</c>/<c>mlock</c> are page-granular and
+    /// Residual: <c>VirtualLock</c>/<c>mlock</c> are page-granular and
     /// non-refcounted, so unlocking this buffer may drop the residency lock
-    /// of a POH page it shares with another still-live locked buffer. A
-    /// pooled, page-aligned locked-scratch allocator is the planned fix.
+    /// of a POH page it shares with another still-live locked buffer.
+    /// <see cref="LockedScratchPool"/> removed this decay for the hot
+    /// per-operation scratch (pooled slabs are never unlocked); what remains
+    /// on this per-buffer path are short-lived standalone buffers (legacy
+    /// <c>char[]</c> access copies, UTF-8/Argon2 byte staging, protector
+    /// ephemerals, <c>ProtectedBlob</c> scratch), so the exposure is a narrow
+    /// transient-overlap window rather than systematic decay. Encrypted state
+    /// (ciphertext / nonce / tag) is no longer locked at all and bypasses
+    /// this method entirely.
     /// </remarks>
     internal static void ZeroBytes(byte[]? buffer)
     {

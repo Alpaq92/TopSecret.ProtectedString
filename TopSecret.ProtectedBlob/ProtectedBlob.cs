@@ -18,9 +18,12 @@ namespace TopSecret;
 /// budgets (<c>RLIMIT_MEMLOCK</c>) make that the wrong shape for bulk data.
 /// <see cref="ProtectedBlob"/> inverts the layout: the bulk ciphertext lives
 /// in ordinary unpinned, unlocked arrays (ciphertext leaks nothing if paged,
-/// dumped, or copied by the GC), and only two things get the
-/// pinned+locked+wiped treatment — the ~60-byte wrapped key envelope and the
-/// one-chunk plaintext scratch alive during a read.
+/// dumped, or copied by the GC), and only the transient plaintext gets the
+/// locked+wiped treatment — the unwrapped DEK and the one-chunk plaintext
+/// scratch alive during a read, both rented from the shared
+/// locked-scratch pool. The ~60-byte wrapped key envelope is pinned but
+/// deliberately not locked (encrypted state, same policy as the core's
+/// ciphertext).
 /// </para>
 /// <para>
 /// <b>Key custody.</b> Each blob encrypts under its own random 256-bit
@@ -96,10 +99,12 @@ public sealed class ProtectedBlob : IDisposable
     private readonly object _sync = new();
 
     /// <summary>
-    /// Snapshot of the process protector taken at construction.
-    /// <see cref="ProtectedString.RotateProcessKey"/> never disposes a
-    /// superseded protector, so this reference stays valid for the blob's
-    /// lifetime.
+    /// Snapshot of the process protector taken at construction. Valid for
+    /// the blob's lifetime because the snapshot carries a
+    /// <c>ProtectorLifetime</c> holder reference (released exactly once in
+    /// <see cref="DisposeUnlocked"/>) — a superseded protector is disposed
+    /// only after its last holder lets go. Do NOT hand this reference to a
+    /// second holder without its own <c>ProtectorLifetime.AddRef</c>.
     /// </summary>
     private readonly KeyAtRestProtector _protector;
 
@@ -229,13 +234,13 @@ public sealed class ProtectedBlob : IDisposable
         byte[]? dek = null;
         try
         {
-            dek = ProtectedString.AllocatePinnedBytes(ChunkFormat.KeySize);
+            dek = ProtectedString.AllocatePinnedBytes(ChunkFormat.KeySize, excludeFromDumps: true);
             RandomNumberGenerator.Fill(dek);
             var noncePrefix = new byte[ChunkFormat.NoncePrefixSize];
             RandomNumberGenerator.Fill(noncePrefix);
 
-            current = ProtectedString.AllocatePinnedBytes(chunkSize);
-            lookahead = ProtectedString.AllocatePinnedBytes(chunkSize);
+            current = ProtectedString.AllocatePinnedBytes(chunkSize, excludeFromDumps: true);
+            lookahead = ProtectedString.AllocatePinnedBytes(chunkSize, excludeFromDumps: true);
 
             long total = 0;
             int currentLength = source.ReadAtLeast(current, current.Length, throwOnEndOfStream: false);
@@ -276,7 +281,7 @@ public sealed class ProtectedBlob : IDisposable
         byte[]? dek = null;
         try
         {
-            dek = ProtectedString.AllocatePinnedBytes(ChunkFormat.KeySize);
+            dek = ProtectedString.AllocatePinnedBytes(ChunkFormat.KeySize, excludeFromDumps: true);
             RandomNumberGenerator.Fill(dek);
             var noncePrefix = new byte[ChunkFormat.NoncePrefixSize];
             RandomNumberGenerator.Fill(noncePrefix);
@@ -387,19 +392,20 @@ public sealed class ProtectedBlob : IDisposable
             var frames = _frames!;
             var noncePrefix = _noncePrefix!;
             int plainLength = frames[chunkIndex].Length - ChunkFormat.TagSize;
-            byte[]? dek = null;
-            byte[]? scratch = null;
+            LockedScratchPool.Lease? dek = null;
+            LockedScratchPool.Lease? scratch = null;
             try
             {
-                dek = UnwrapDek();
-                scratch = ProtectedString.AllocatePinnedBytes(plainLength);
-                DecryptChunkInto(dek, frames, noncePrefix, chunkIndex, scratch);
-                handler(scratch.AsSpan(0, plainLength));
+                dek = RentDek();
+                scratch = LockedScratchPool.Rent(plainLength);
+                var plain = scratch.Bytes(plainLength);
+                DecryptChunkInto(dek.Bytes(ChunkFormat.KeySize), frames, noncePrefix, chunkIndex, plain);
+                handler(plain);
             }
             finally
             {
-                ProtectedString.ZeroBytes(scratch);
-                ProtectedString.ZeroBytes(dek);
+                scratch?.Return();
+                dek?.Return();
             }
         }
     }
@@ -418,19 +424,20 @@ public sealed class ProtectedBlob : IDisposable
             var frames = _frames!;
             var noncePrefix = _noncePrefix!;
             int plainLength = frames[chunkIndex].Length - ChunkFormat.TagSize;
-            byte[]? dek = null;
-            byte[]? scratch = null;
+            LockedScratchPool.Lease? dek = null;
+            LockedScratchPool.Lease? scratch = null;
             try
             {
-                dek = UnwrapDek();
-                scratch = ProtectedString.AllocatePinnedBytes(plainLength);
-                DecryptChunkInto(dek, frames, noncePrefix, chunkIndex, scratch);
-                return handler(scratch.AsSpan(0, plainLength));
+                dek = RentDek();
+                scratch = LockedScratchPool.Rent(plainLength);
+                var plain = scratch.Bytes(plainLength);
+                DecryptChunkInto(dek.Bytes(ChunkFormat.KeySize), frames, noncePrefix, chunkIndex, plain);
+                return handler(plain);
             }
             finally
             {
-                ProtectedString.ZeroBytes(scratch);
-                ProtectedString.ZeroBytes(dek);
+                scratch?.Return();
+                dek?.Return();
             }
         }
     }
@@ -466,23 +473,24 @@ public sealed class ProtectedBlob : IDisposable
             ThrowIfDisposed();
             var frames = _frames!;
             var noncePrefix = _noncePrefix!;
-            byte[]? dek = null;
-            byte[]? scratch = null;
+            LockedScratchPool.Lease? dek = null;
+            LockedScratchPool.Lease? scratch = null;
             try
             {
-                dek = UnwrapDek();
-                scratch = ProtectedString.AllocatePinnedBytes(_chunkSize);
+                dek = RentDek();
+                scratch = LockedScratchPool.Rent(_chunkSize);
                 for (int index = 0; index < frames.Length; index++)
                 {
                     int plainLength = frames[index].Length - ChunkFormat.TagSize;
-                    DecryptChunkInto(dek, frames, noncePrefix, index, scratch.AsSpan(0, plainLength));
-                    handler(scratch.AsSpan(0, plainLength));
+                    var plain = scratch.Bytes(plainLength);
+                    DecryptChunkInto(dek.Bytes(ChunkFormat.KeySize), frames, noncePrefix, index, plain);
+                    handler(plain);
                 }
             }
             finally
             {
-                ProtectedString.ZeroBytes(scratch);
-                ProtectedString.ZeroBytes(dek);
+                scratch?.Return();
+                dek?.Return();
             }
         }
     }
@@ -516,15 +524,15 @@ public sealed class ProtectedBlob : IDisposable
 
             var frames = _frames!;
             var noncePrefix = _noncePrefix!;
-            byte[]? dek = null;
+            LockedScratchPool.Lease? dek = null;
             int written = 0;
             try
             {
-                dek = UnwrapDek();
+                dek = RentDek();
                 for (int index = 0; index < frames.Length; index++)
                 {
                     int plainLength = frames[index].Length - ChunkFormat.TagSize;
-                    DecryptChunkInto(dek, frames, noncePrefix, index, destination.Slice(written, plainLength));
+                    DecryptChunkInto(dek.Bytes(ChunkFormat.KeySize), frames, noncePrefix, index, destination.Slice(written, plainLength));
                     written += plainLength;
                 }
             }
@@ -538,7 +546,7 @@ public sealed class ProtectedBlob : IDisposable
             }
             finally
             {
-                ProtectedString.ZeroBytes(dek);
+                dek?.Return();
             }
         }
     }
@@ -562,7 +570,7 @@ public sealed class ProtectedBlob : IDisposable
     /// The caller decides what the destination does with the bytes (TLS
     /// encrypts, a <see cref="FileStream"/> persists to disk) — the
     /// library's job ends at the <c>Stream.Write</c> boundary, exactly like
-    /// <see cref="ProtectedString.WriteUtf8To"/>.
+    /// <see cref="ProtectedString.WriteUtf8To(Stream)"/>.
     /// </remarks>
     public void WriteTo(Stream destination)
     {
@@ -577,16 +585,20 @@ public sealed class ProtectedBlob : IDisposable
             ThrowIfDisposed();
             var frames = _frames!;
             var noncePrefix = _noncePrefix!;
-            byte[]? dek = null;
+            LockedScratchPool.Lease? dek = null;
             byte[]? scratch = null;
             try
             {
-                dek = UnwrapDek();
-                scratch = ProtectedString.AllocatePinnedBytes(_chunkSize);
+                dek = RentDek();
+                // scratch stays a dedicated array (not pooled): it is handed
+                // to an arbitrary Stream implementation below, and a stream
+                // that captured a pooled slab reference could read every
+                // future secret staged there.
+                scratch = ProtectedString.AllocatePinnedBytes(_chunkSize, excludeFromDumps: true);
                 for (int index = 0; index < frames.Length; index++)
                 {
                     int plainLength = frames[index].Length - ChunkFormat.TagSize;
-                    DecryptChunkInto(dek, frames, noncePrefix, index, scratch.AsSpan(0, plainLength));
+                    DecryptChunkInto(dek.Bytes(ChunkFormat.KeySize), frames, noncePrefix, index, scratch.AsSpan(0, plainLength));
                     // Deliberately the byte[] overload: Stream.Write(ReadOnlySpan<byte>)'s
                     // base implementation copies through an unwiped ArrayPool rental on
                     // streams that don't override it.
@@ -596,7 +608,7 @@ public sealed class ProtectedBlob : IDisposable
             finally
             {
                 ProtectedString.ZeroBytes(scratch);
-                ProtectedString.ZeroBytes(dek);
+                dek?.Return();
             }
         }
     }
@@ -649,29 +661,40 @@ public sealed class ProtectedBlob : IDisposable
         _noncePrefix = null;
         _length = 0;
         _disposed = true;
+        // Release the ProtectorLifetime holder reference taken at
+        // construction (see GetOrInitProcessProtector). Runs at most once
+        // (guarded by _disposed above), Interlocked-based and safe from the
+        // finalizer thread. Null only if the constructor threw before the
+        // protector snapshot.
+        if (_protector is not null)
+        {
+            ProtectorLifetime.Release(_protector);
+        }
     }
 
     // ---- internals -------------------------------------------------------
 
     /// <summary>
-    /// Unwraps the DEK into a freshly allocated pinned+locked scratch the
-    /// caller must wipe with <see cref="ProtectedString.ZeroBytes"/>. Caller holds
-    /// <see cref="_sync"/>. One call per public operation — this is the
-    /// master-unwrap the whole operation amortises.
+    /// Unwraps the DEK into pooled locked scratch the caller must
+    /// <c>Return()</c> in a <c>finally</c> (which wipes it). Caller holds
+    /// <see cref="_sync"/>. One rent per public operation — this is the
+    /// master-unwrap the whole operation amortises — and renting from
+    /// <see cref="LockedScratchPool"/> keeps the per-operation cost
+    /// syscall-free.
     /// </summary>
-    private byte[] UnwrapDek()
+    private LockedScratchPool.Lease RentDek()
     {
-        var dek = ProtectedString.AllocatePinnedBytes(ChunkFormat.KeySize);
+        var dek = LockedScratchPool.Rent(ChunkFormat.KeySize);
         bool ok = false;
         try
         {
-            _dekEnvelope!.UnwrapInto(_protector, dek, _instanceId);
+            _dekEnvelope!.UnwrapInto(_protector, dek.Bytes(ChunkFormat.KeySize), _instanceId);
             ok = true;
             return dek;
         }
         finally
         {
-            if (!ok) ProtectedString.ZeroBytes(dek);
+            if (!ok) dek.Return();
         }
     }
 

@@ -57,6 +57,7 @@ Two front-line packages ship from this repo and cover the two ends of the spectr
   - [Build-time analyzer (TPS001 / TPS002)](#build-time-analyzer-tps001--tps002)
   - [Process-key rotation (opt-in)](#process-key-rotation-opt-in)
   - [Memory-locking policy](#memory-locking-policy)
+    - [Crash-dump exclusion](#crash-dump-exclusion)
 - [Performance](#performance)
   - [Default tier (no hardware-backed wrap)](#default-tier-no-hardware-backed-wrap)
   - [Hardware-backed tier](#hardware-backed-tier)
@@ -246,20 +247,26 @@ The `string` is constructed inside `SendAsync`, attached to that single `HttpReq
 
 #### ADO.NET — `SqlCredential` and connection strings
 
-For SQL Server, prefer `SqlCredential` over inlining the password into the connection string. `SqlCredential` takes a `SecureString` — which is weaker than `ProtectedString` (see [Replacing `SecureString`](#replacing-securestring)) but is what the ADO.NET API will accept. Build the `SecureString` inside `Access` and hand it straight to `SqlCredential`; the `ProtectedString` stays encrypted at rest, and the `SecureString`'s lifetime is bounded by the `using`.
+For SQL Server, prefer `SqlCredential` over inlining the password into the connection string. There's no way around `SecureString` here — it's the only type `SqlCredential` takes, despite being weaker than `ProtectedString` and unencrypted off Windows (see [Replacing `SecureString`](#replacing-securestring)). Treat it as an interop adapter, not storage: build it inside `Access` once, hand it to a `SqlCredential` you cache for the application's lifetime, and let the `ProtectedString` remain the encrypted source of truth. Two constraints worth knowing up front: `SqlCredential` caps the password at 128 characters, and it rejects a `SecureString` that isn't `MakeReadOnly()`.
 
 ```csharp
-using var sec = new SecureString();
-password.Access(plain =>
-{
-    foreach (var ch in plain) sec.AppendChar(ch);
-    sec.MakeReadOnly();
-});
+// Composition root — once per identity. SqlClient pools connections by
+// SqlCredential *instance* (reference equality), so a fresh credential per
+// Open() silently gives every connection its own pool. Cache one — and don't
+// dispose its SecureString while any pool referencing the credential may
+// still open new physical connections; that mistake surfaces later as an
+// intermittent ObjectDisposedException when the pool grows.
+var credential = new SqlCredential(username, password.ToSecureString());
 
-var cred = new SqlCredential(username, sec);
-using var conn = new SqlConnection("Server=...;Database=...;", cred);
+// Per query — every connection presents the same cached credential and
+// shares its pool.
+using var conn = new SqlConnection("Server=...;Database=...;", credential);
 await conn.OpenAsync();
 ```
+
+`ToSecureString()` (from `SecureStringInterop`) copies the plaintext in a single pass under `fixed` via the unsafe `SecureString(char*, int)` constructor — no per-character `AppendChar` growth states — and returns it already `MakeReadOnly()`, which `SqlCredential` requires.
+
+This ordering holds even off Windows, where `SecureString` doesn't encrypt — two of its three defenses survive: a single copy in unmanaged, non-GC memory (never duplicated by heap compaction) and deterministic zeroing on dispose. Inlining the password instead is strictly worse, because a connection string is SqlClient's pool key: the driver itself retains the password in several managed strings — the verbatim connection string, the parsed keyword table, an internal password field — for the life of the pool; immutable, unwipeable, and unaffected by `Persist Security Info=false`, which only scrubs the public `ConnectionString` getter. SqlClient is also more careful with a `SecureString` at login: the plaintext is materialised only at the physical send, the temporary buffer is zeroed, and the packet buffer is cleared afterward — a wipe the connection-string path skips.
 
 For drivers that take only a `string` connection string (Npgsql, MySqlConnector, Oracle ManagedDataAccess), build the connection string inside `Access`, open the connection inside the same callback, and never store the connection-string `string` in a field. Pool the `DbConnection` itself — not the password.
 
@@ -382,7 +389,7 @@ Per-provider round-trip costs for the hardware tier are in [Performance: hardwar
 ### ProtectedBlob security notes
 
 - **What it adds over a plain `byte[]`:** encryption at rest in process memory (a heap dump between reads sees ciphertext), no GC-copied plaintext residue for the bulk (only the one-chunk scratch, which is pinned/locked/wiped), and fail-closed integrity over reorder/truncate/transplant/bit-flip. What it does **not** add: any defence against an attacker reading the live process — same [threat model](#threat-model) honesty as the core.
-- **Plaintext residency:** one chunk during reads; two chunks during `FromStream` construction (a lookahead buffer decides the final-chunk flag). Locked-memory footprint scales with `chunkSize` (4 KiB–1 MiB, default 64 KiB), not blob size — see [Memory-locking policy](#memory-locking-policy) for the per-process budget. `mlock`/`VirtualLock` operate at page granularity, so small scratches still cost at least a 4 KiB page; page granularity also means unlock is not refcounted: wiping-and-unlocking one buffer can unlock a page shared with another still-live locked buffer (a residual shared with the core library's own scratch handling; a pooled locked-scratch allocator is a planned follow-up for both).
+- **Plaintext residency:** one chunk during reads; two chunks during `FromStream` construction (a lookahead buffer decides the final-chunk flag). Locked-memory footprint scales with `chunkSize` (4 KiB–1 MiB, default 64 KiB), not blob size — see [Memory-locking policy](#memory-locking-policy) for the per-process budget. Per-operation DEK and chunk scratch rent from the shared page-aligned locked-scratch pool (see [Crash-dump exclusion](#crash-dump-exclusion)) — no per-op lock/unlock syscalls, no page-aliasing decay. The residual per-buffer path (`FromStream` construction buffers, `WriteTo` stream staging) keeps the documented page-granularity caveat: unlock is not refcounted, so wiping-and-unlocking one of those buffers can unlock a page shared with another still-live locked buffer for the duration of those transients.
 - **Process-key rotation:** blobs snapshot the process protector at construction and keep working after [`RotateProcessKey()`](#process-key-rotation-opt-in), but they do **not** participate in rotation — this blob's DEK and chunk ciphertext are never re-keyed during its lifetime. A memory dump captured while a blob is alive (which, on the software tiers, includes master-key material) can decrypt that blob's ciphertext image regardless of later rotations. Dispose blobs to end their exposure. O(1) re-wrap participation is a planned follow-up.
 - **Read-once options:** the first construction of *either* `ProtectedBlob` or `ProtectedString` samples the read-once `ProtectedStringOptions` keys (`KeyAtRestProtection`, `UnwrappedKeyCacheTtl`) — set them in your composition root before constructing either type.
 - **Streaming reads deliver an authenticated prefix.** `AccessChunks`/`WriteTo` hand chunks to the consumer as each one authenticates (the `secretstream` model); if a later chunk fails the tag, earlier chunks have already been seen — the failure itself can never be silent, and the single-shot `CopyTo` instead zeroes everything it wrote.
@@ -427,6 +434,10 @@ It also opts into `KeyAtRestProtection.HardwareBackedPreferred` at startup so th
 | `Access(Action<char[]>)` / `Access<T>(Func<char[], T>)` | **Obsolete** — kept for callers that genuinely need a `char[]` (e.g. an external API that takes one). The buffer is zeroed on return; do not retain the reference. The `ReadOnlySpan<char>` overloads are strictly safer. |
 | `CopyTo(Span<char> destination)` | Copy the plaintext into a caller-owned buffer (e.g. `stackalloc char[N]`); returns the number of chars written (`Length`). The library does not own the destination — the caller is responsible for wiping or letting it fall out of scope. |
 | `WriteUtf8To(Stream destination)` | Encode the plaintext as UTF-8 and write straight to a stream — no intermediate managed `string` materialises. The intermediate UTF-8 bytes pass through a pinned, locked, wiped-on-exit buffer. |
+| `WriteUtf8To(IBufferWriter<byte> destination)` | Encode the plaintext as UTF-8 directly into the writer's buffer via `GetSpan` — zero intermediate copies. The writer owns (and is responsible for clearing) its backing memory, same boundary contract as the `Stream` overload. |
+| `Utf8Access(ReadOnlySpanAction<byte>)` / `Utf8Access<T>(ReadOnlySpanFunc<byte, T>)` | The byte-oriented sibling of `Access`: run a callback against the plaintext encoded as UTF-8 in locked, wiped-on-exit scratch. For consumers that want bytes — Basic-auth credentials, KDF inputs, `Utf8JsonWriter` values. |
+| `AppendChars(ReadOnlySpan<char>)` | Bulk sibling of `AppendChar` — one capacity check and one copy for the whole span. Same build-mode semantics. |
+| `ToSecureString()` *(extension, `SecureStringInterop`)* | Single-copy bridge for APIs whose signatures demand a genuine `SecureString` (`SqlCredential`, `PSCredential`) — built under `fixed` via the unsafe `SecureString(char*, int)` constructor, returned read-only. See [ADO.NET — `SqlCredential` and connection strings](#adonet--sqlcredential-and-connection-strings) for lifetime guidance. |
 | `Copy()` | Independent, writable copy. |
 | `Equals(ProtectedString)` | Constant-time comparison. (`Equals(object?)` is a one-line override that defers to this; same behavior.) |
 | `GetHashCode()` | Length-only hash. Plaintext intentionally does not contribute, so a dictionary-bucket lookup never reveals anything about the secret through its hash function. |
@@ -447,8 +458,8 @@ It also opts into `KeyAtRestProtection.HardwareBackedPreferred` at startup so th
 | --- | --- | --- |
 | **Encryption at rest** | Windows only (DPAPI `CryptProtectMemory`). **No encryption on Linux/macOS/mobile** — bytes are plaintext in unmanaged memory. | AES-GCM on every supported platform. |
 | **Encryption strength** | DPAPI `SAME_PROCESS` — reversible in-process ([public PoC](https://blog.slowerzs.net/posts/cryptdecryptmemory/)). | AES-GCM-256 with per-instance AAD binding (details in [Security model](#security-model)); opt-in [hardware-backed key wrap](#key-at-rest-wrapping-opt-in-tiered) (SEP / Keystore / TPM) for real passive-dump resistance. |
-| **Where bytes live** | Unmanaged memory. | Pinned object heap, with `VirtualLock` / `mlock`. |
-| **Swap protection** | None — pages can be written to disk. | `VirtualLock` / `mlock` on every sensitive buffer; configurable failure policy. |
+| **Where bytes live** | Unmanaged memory. | Pinned object heap; plaintext and key buffers `VirtualLock`ed / `mlock`ed (encrypted state is deliberately pinned-only — safe by construction). |
+| **Swap protection** | None — pages can be written to disk. | `VirtualLock` / `mlock` on every plaintext and key buffer (hot scratch via a page-aligned locked pool); configurable failure policy. Ciphertext is not locked — it is already safe to page. |
 | **Wipe on dispose** | `SecureZeroMemory`. | `CryptographicOperations.ZeroMemory`, plus a finalizer for the forget-to-dispose case. |
 | **Build char-by-char** | `AppendChar`. | `AppendChar` writes to a pinned, locked build buffer (geometric growth, single encryption on `MakeReadOnly()`) — see [API surface](#api-surface). |
 | **Brief plaintext access** | `Marshal.SecureStringToGlobalAllocUnicode` + manual zero/free — easy to forget the wipe. | `Access(ReadOnlySpanAction<char>)` — the span is a `ref struct` the compiler refuses to let escape (no capture, no field, no return, no `await`); buffer wiped on return. The legacy `Action<char[]>` shape is still available, marked obsolete. |
@@ -485,6 +496,8 @@ The API was deliberately shaped to mirror `SecureString`. Most call sites map 1:
 
 The one shape change is plaintext access: `ProtectedString` does not hand out a pointer the caller is expected to free. Callers pass a lambda and the buffer is zeroed automatically on return. That removes the most common `SecureString` leak — forgetting to call `ZeroFreeGlobalAllocUnicode`.
 
+The mapping deliberately stops at APIs whose signatures demand a genuine `SecureString` (`SqlCredential`, `PSCredential`, `X509Certificate2` password overloads). `ProtectedString` does not impersonate the type there — build a `SecureString` inside `Access` and hand it over; [FAQ #13](#13-why-cant-protectedstring-be-injected-where-an-api-demands-a-securestring) explains why that's a designed boundary rather than a missing feature.
+
 ## Compared to `GuardedString`
 
 The API was deliberately shaped after Evolveum's [`GuardedString`](#inspiration) — same problem, two decades apart, implementation choices have diverged in ways worth being explicit about.
@@ -495,7 +508,7 @@ The API was deliberately shaped after Evolveum's [`GuardedString`](#inspiration)
 | --- | --- | --- |
 | **Encryption** | Pluggable `Encryptor` abstraction. The default is symmetric and **unauthenticated** — the API exposes no tag or AAD. | **AES-GCM-256** authenticated encryption — random nonce, tag, per-instance AAD (see [Security model](#security-model)). |
 | **Key scope** | Static process-wide `Encryptor` from `EncryptorFactory.newRandomEncryptor()`. Random per JVM. | Static process-wide 32-byte master, lazily initialised. Random per process. |
-| **Where bytes live** | Plain `byte[] encryptedBytes` on the Java heap — relocatable by the GC, no `mlock`. | Pinned object heap, with `VirtualLock` / `mlock` and a configurable [failure policy](#memory-locking-policy). |
+| **Where bytes live** | Plain `byte[] encryptedBytes` on the Java heap — relocatable by the GC, no `mlock`. | Pinned object heap; plaintext and key buffers `VirtualLock`ed / `mlock`ed with a configurable [failure policy](#memory-locking-policy). |
 | **Cross-instance binding** | None — ciphertext from one instance can be swapped onto another and decrypts cleanly. | Per-instance 64-bit id passed as AEAD associated data; tag check fails on cross-instance swap. |
 | **Plaintext access** | `access(Accessor)` — single shape, void-returning callback. Buffer zeroed on return via `SecurityUtil.clear`. | `Access(ReadOnlySpanAction<char>)` plus `Access<T>(ReadOnlySpanFunc<char, T>)`; the span is a `ref struct` the compiler refuses to let escape. Buffer wiped on return. Sinks (`CopyTo(Span<char>)`, `WriteUtf8To(Stream)`) plus a [build-time analyzer](#build-time-analyzer-tps001--tps002) catch the common copy patterns. |
 | **Equality** | Compares **stored Base64-SHA-1 hashes** of the plaintext — fast, but the hash sits in memory next to the ciphertext, and `String.equals` is not constant-time. SHA-1 is broken for collision resistance. | `CryptographicOperations.FixedTimeEquals` over freshly decrypted plaintext, with deadlock-free lock ordering (see [Security model](#what-this-library-does)). |
@@ -714,7 +727,7 @@ Concurrent operations on instances *not* currently being migrated proceed unbloc
 
 ### Memory-locking policy
 
-`ProtectedString` calls `VirtualLock` / `mlock` on every sensitive buffer. Locking can fail — the platform may not expose the primitive at all, or the process may be at `RLIMIT_MEMLOCK` / working-set capacity. The static option `ProtectedStringOptions.MemoryLockingFailureBehavior` decides what happens when that occurs:
+`ProtectedString` calls `VirtualLock` / `mlock` on every plaintext- and key-bearing buffer (encrypted state — ciphertext, nonce, tag — is deliberately pinned-only; it is safe to page by construction). Locking can fail — the platform may not expose the primitive at all, or the process may be at `RLIMIT_MEMLOCK` / working-set capacity. The static option `ProtectedStringOptions.MemoryLockingFailureBehavior` decides what happens when that occurs:
 
 | Value | What it does |
 | --- | --- |
@@ -733,6 +746,20 @@ ProtectedStringOptions.MemoryLockingFailureBehavior = MemoryLockingFailureBehavi
 Or bind it from `appsettings.json` the same way as `KeyAtRestProtection` above — `ProtectedStringOptions` has no dependency on `Microsoft.Extensions.Configuration`, so the `Enum.TryParse` pattern is the same for every option.
 
 > **`RLIMIT_MEMLOCK` budget on libc targets.** Linux unprivileged processes default to ≈64 KiB locked memory; iOS is stricter. Pinned buffers on the POH often share pages so practical capacity is higher than per-buffer counting suggests; set the policy to `Throw` if you need to fail loudly when the budget is hit.
+
+#### Crash-dump exclusion
+
+Alongside locking, every plaintext- and key-bearing buffer is excluded from OS crash dumps where the platform offers a primitive, governed by the same `MemoryLockingFailureBehavior` policy:
+
+| Platform | Primitive | What it covers |
+| --- | --- | --- |
+| Windows 10+ / Server 2016+ | `WerRegisterExcludedMemoryBlock` | Dumps generated by Windows Error Reporting — the ones that get uploaded to crash servers. **Not** Task Manager dumps, ProcDump, debugger `.dump`, or kernel dumps. |
+| Linux / Android (kernel 3.4+) | `madvise(MADV_DONTDUMP)` | The kernel's core-dump path. **Not** `ptrace` readers (gcore, attached debuggers). |
+| macOS / iOS / Mac Catalyst / browser-wasm | — | No exclusion primitive exists; calls are silent no-ops (not-applicable is not treated as a policy failure). |
+
+Exclusion is scoped to what actually needs it: plaintext scratch, build buffers, unwrapped master keys, and `ProtectedBlob`'s DEK / chunk scratch. Ciphertext, nonces, and tags stay dumpable — they're safe by construction, and on Windows each exclusion consumes one of WER's 512 registration slots, so spending them on encrypted state would be waste. Buffers return to normal dump behaviour when they're wiped (by which point they contain zeros).
+
+The lock and exclusion primitives are page-granular and non-refcounted, which historically meant a wipe of one buffer could silently drop the residency lock (or dump exclusion) of a page it shared with a still-live buffer — the master key being the most likely victim. That decay is gone for the paths that churn: all per-operation plaintext scratch is served from a process-wide pool of **page-aligned slabs** that are locked and dump-excluded once at creation, used exclusively for sensitive scratch, and never unlocked or re-included for the life of the process (renting and returning a chunk touches no syscalls, and returned chunks are zeroed before reuse). Encrypted state — ciphertext, nonce, tag — is deliberately *not* locked or excluded at all: it's safe by construction, and keeping it off the lock/unlock path removes its page-sharing interference too. What remains on the per-buffer path are short-lived standalone buffers that must stay real arrays (the obsolete `char[]` access copies, UTF-8/Argon2 staging handed to external code, protector ephemerals, `ProtectedBlob` chunk scratch); their unlock can still overlap a shared page for the duration of those transients — a narrow window, documented rather than hidden. And dump exclusion is a *reduce-the-blast-radius* layer for crash artifacts, not a defence against a live attacker — the [threat model](#threat-model) is unchanged.
 
 ## Performance
 
@@ -1034,6 +1061,15 @@ What you do get by keeping the string narrow: the `ProtectedString` itself stays
 #### 12. My analyzer is firing TPS001 / TPS002. How do I tell what's wrong?
 
 The most common cause is `new string(plain)` or `plain.ToString()` inside an `Access` callback — the resulting `string` is on the heap, unwipeable, and visible to a heap dump. Replace it with a `Span<char>` sink (`CopyTo`, `WriteUtf8To`) or transform the data inside the callback. See [Build-time analyzer](#build-time-analyzer-tps001--tps002) for the full trigger list and unavoidable-boundary suppressions.
+
+#### 13. Why can't `ProtectedString` be injected where an API demands a `SecureString`?
+
+Some dependencies — ADO.NET's `SqlCredential`, PowerShell's `PSCredential`, the `X509Certificate2` password overloads — accept secrets only as `SecureString`. Making `ProtectedString` pass as one was never a goal, for two reasons that survive scrutiny:
+
+- **There is no seam to inject into.** [`SecureString` is `sealed`](https://learn.microsoft.com/dotnet/api/system.security.securestring), the consuming signatures take the concrete type, and the `Marshal.SecureStringTo*` conversions every consumer funnels through call non-virtual internal methods that read `SecureString`'s private unmanaged buffer directly. No interface, no virtual dispatch, no subclass point — nothing a substitute type could hook. What's left is reflection into corelib private fields, which breaks across runtime versions and platforms and dies under trimming / NativeAOT; a security library has no business being that fragile.
+- **It wouldn't buy anything.** The consumer materialises the plaintext at the point of use regardless of the container — SqlClient, for instance, decrypts the `SecureString` into temporary buffers to build the TDS login packet. The exposure floor is set by the consuming protocol, not by whichever type delivered the secret to it. A flawless injection would inherit exactly the same floor, at the cost of the fragility above.
+
+So the supported shape at such a boundary is a **hand-off, not an impersonation**: the secret stays in `ProtectedString` at rest, and a genuine `SecureString` is built inside `Access` right where the API needs it, scoped as tightly as the consumer allows — per call for most APIs, cached alongside the `SqlCredential` where connection pooling demands it — see [ADO.NET — `SqlCredential` and connection strings](#adonet--sqlcredential-and-connection-strings) for the worked example.
 
 ## Development
 

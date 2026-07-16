@@ -64,16 +64,48 @@ internal static class MemoryLocker
     /// preceding lock failed; returns <see langword="true"/> when the unlock
     /// either succeeded or was unnecessary.
     /// </summary>
+    /// <remarks>
+    /// Also calls <see cref="DumpExclusion.TryInclude{T}"/> — every wipe path
+    /// in the library funnels through this method after zeroing, which keeps
+    /// the exclude/include pairing automatic where re-inclusion applies. On
+    /// Windows that returns the buffer's exact-range WER budget entry; on
+    /// libc targets <c>TryInclude</c> is deliberately a no-op (one-way
+    /// exclusion — see its remarks). Harmless for buffers that were never
+    /// excluded.
+    /// </remarks>
     public static bool TryUnlock<T>(T[] buffer) where T : unmanaged
     {
         if (buffer.Length == 0) return true;
+        DumpExclusion.TryInclude(buffer);
         if (!IsSupported) return true;
         return TryUnlockNative(
             Marshal.UnsafeAddrOfPinnedArrayElement(buffer, 0),
             ByteSize(buffer));
     }
 
-    private static nuint ByteSize<T>(T[] buffer) where T : unmanaged =>
+    /// <summary>
+    /// Locks an arbitrary (caller-aligned) address range. Used by
+    /// <see cref="LockedScratchPool"/> to lock a slab's page-aligned interior
+    /// exactly once instead of per-buffer. Same return contract as
+    /// <see cref="TryLock{T}"/>.
+    /// </summary>
+    public static bool TryLockRange(IntPtr addr, int size)
+    {
+        if (size == 0) return true;
+        if (!IsSupported) return false;
+        return TryLockNative(addr, (nuint)size);
+    }
+
+    /// <summary>Releases a prior <see cref="TryLockRange"/>. Same contract as <see cref="TryUnlock{T}"/> minus the dump re-include (range callers own their exclusion pairing).</summary>
+    public static bool TryUnlockRange(IntPtr addr, int size)
+    {
+        if (size == 0) return true;
+        if (!IsSupported) return true;
+        return TryUnlockNative(addr, (nuint)size);
+    }
+
+    /// <summary>Byte size of a pinned array — shared with <see cref="DumpExclusion"/> so the sizing math has exactly one implementation.</summary>
+    internal static nuint ByteSize<T>(T[] buffer) where T : unmanaged =>
         (nuint)((long)buffer.Length * Unsafe.SizeOf<T>());
 
     private static bool Probe()
@@ -84,7 +116,7 @@ internal static class MemoryLocker
             var addr = Marshal.UnsafeAddrOfPinnedArrayElement(probe, 0);
             var size = (nuint)probe.Length;
 
-            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            if (OperatingSystem.IsWindows())
             {
                 if (!VirtualLock(addr, size)) return false;
                 VirtualUnlock(addr, size);
@@ -109,7 +141,7 @@ internal static class MemoryLocker
         if (size == 0) return true;
         try
         {
-            return RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+            return OperatingSystem.IsWindows()
                 ? VirtualLock(addr, size)
                 : mlock(addr, size) == 0;
         }
@@ -124,7 +156,7 @@ internal static class MemoryLocker
         if (size == 0) return true;
         try
         {
-            return RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+            return OperatingSystem.IsWindows()
                 ? VirtualUnlock(addr, size)
                 : munlock(addr, size) == 0;
         }

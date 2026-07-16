@@ -10,7 +10,7 @@ namespace TopSecret.ProtectedStringTests;
 /// (<c>EnsurePeriodicRotationTimer</c> and its callback), the transient-slot
 /// rotation warning, the rotation reentrancy guard, the internal
 /// process-protector accessor, and the failure-cleanup branches of
-/// <c>LiftIntoBuildBuffer</c> / <c>EncryptInternal</c> / <c>DecryptUnsafe</c>.
+/// <c>LiftIntoBuildBuffer</c> / <c>EncryptInternal</c> / <c>DecryptInto</c>.
 /// Every test saves and restores the process-global state it touches
 /// (options, rotation timer, protector registry, warning gates), matching the
 /// save-mutate-restore idiom used throughout <c>ProtectedStringTests</c>.
@@ -102,6 +102,98 @@ public class RotationTimerAndRareBranchCoverageTests
 
     [TearDown]
     public void Teardown() => DisposeAndClearRotationTimer();
+
+    // ---- ProtectorLifetime refcounting ------------------------------------
+
+    // Exercises the deterministic disposal path: a protector superseded by
+    // RotateProcessKey must be disposed the moment its last holder migrates
+    // off it — no GC/finalizer involvement.
+    [Test]
+    [NonParallelizable]
+    public void Rotation_disposes_superseded_protector_when_last_holder_migrates()
+    {
+        var priorPolicy = ProtectedStringOptions.ProcessKeyRotationPolicy;
+        var priorProtector = TestAccessors.GetProcessKeyProtector();
+        try
+        {
+            ProtectedStringOptions.ProcessKeyRotationPolicy = ProcessKeyRotation.OnDemand;
+
+            // Install a fresh protector as the global so ambient instances
+            // from other tests (which reference earlier protectors, or hold
+            // never-released GetOrInitProcessProtector references) cannot pin
+            // the protector this test rotates away.
+            var master = GC.AllocateArray<byte>(32, pinned: true);
+            System.Security.Cryptography.RandomNumberGenerator.Fill(master);
+            var fresh = KeyAtRestProtectorFactory.Create(master);
+            TestAccessors.SetProcessKeyProtector(fresh);
+
+            using var ps = new ProtectedString("refcounted-rotation".AsSpan());
+
+            ProtectedString.RotateProcessKey();
+
+            Assert.That(IsProtectorDisposed(fresh), Is.True,
+                "the superseded protector must be disposed as soon as its last holder " +
+                "migrated — deterministically, not on some later GC");
+            Assert.That(ps.Access(plain => new string(plain)), Is.EqualTo("refcounted-rotation"),
+                "the migrated instance must decrypt under the new protector");
+        }
+        finally
+        {
+            TestAccessors.SetProcessKeyProtector(priorProtector);
+            ProtectedStringOptions.ProcessKeyRotationPolicy = priorPolicy;
+        }
+    }
+
+    // The inverse guarantee: while any holder still references the superseded
+    // protector (here: an instance constructed under the Disabled policy, so
+    // it is not in the migration registry), rotation must NOT dispose it —
+    // the holder can still decrypt through it.
+    [Test]
+    [NonParallelizable]
+    public void Rotation_keeps_superseded_protector_alive_while_a_holder_remains()
+    {
+        var priorPolicy = ProtectedStringOptions.ProcessKeyRotationPolicy;
+        var priorProtector = TestAccessors.GetProcessKeyProtector();
+        try
+        {
+            var master = GC.AllocateArray<byte>(32, pinned: true);
+            System.Security.Cryptography.RandomNumberGenerator.Fill(master);
+            var fresh = KeyAtRestProtectorFactory.Create(master);
+            TestAccessors.SetProcessKeyProtector(fresh);
+
+            // Constructed under Disabled ⇒ holds a reference but is not in
+            // the rotation registry, so it will not be migrated.
+            ProtectedStringOptions.ProcessKeyRotationPolicy = ProcessKeyRotation.Disabled;
+            using var unregistered = new ProtectedString("pinned-holder".AsSpan());
+
+            ProtectedStringOptions.ProcessKeyRotationPolicy = ProcessKeyRotation.OnDemand;
+            ProtectedString.RotateProcessKey();
+
+            Assert.That(IsProtectorDisposed(fresh), Is.False,
+                "a superseded protector with a live holder must stay undisposed");
+            Assert.That(unregistered.Access(plain => new string(plain)), Is.EqualTo("pinned-holder"),
+                "the unmigrated instance must still decrypt under the old protector");
+
+            // Disposing the last holder is what triggers the deterministic
+            // teardown (the using is the failure-path safety net; Dispose is
+            // idempotent so the double call is fine).
+            unregistered.Dispose();
+            Assert.That(IsProtectorDisposed(fresh), Is.True,
+                "disposing the last holder must dispose the superseded protector");
+        }
+        finally
+        {
+            TestAccessors.SetProcessKeyProtector(priorProtector);
+            ProtectedStringOptions.ProcessKeyRotationPolicy = priorPolicy;
+        }
+    }
+
+    private static bool IsProtectorDisposed(KeyAtRestProtector protector)
+    {
+        var field = protector.GetType().GetField("_disposed", BindingFlags.Instance | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException($"_disposed not found on {protector.GetType().Name}");
+        return (bool)field.GetValue(protector)!;
+    }
 
     // ---- EnsurePeriodicRotationTimer + timer callback ---------------------
 
@@ -357,7 +449,7 @@ public class RotationTimerAndRareBranchCoverageTests
         using var ps = new ProtectedString("lift-me".AsSpan());
 
         // Instance-local sabotage only: swap this instance's protector for one
-        // whose UnwrapKey always throws, forcing DecryptUnsafe to fail inside
+        // whose UnwrapKey always throws, forcing DecryptInto to fail inside
         // LiftIntoBuildBuffer's try block.
         TestAccessors.SetInstanceProtector(ps, new AlwaysThrowingProtector());
         Assert.Throws<InvalidOperationException>(() => ps.AppendChar('!'),
@@ -396,8 +488,9 @@ public class RotationTimerAndRareBranchCoverageTests
         Assert.That(ps.Access(plain => new string(plain)), Is.EqualTo("ab"));
     }
 
-    // Exercises ProtectedString.cs line 1446: DecryptUnsafe's zero-length early return,
-    // reached via Copy() on an empty, committed (non-build-mode) instance.
+    // Exercises RentPlaintextLocked's zero-length early return (empty span,
+    // no lease, no decrypt), reached via Copy() on an empty, committed
+    // (non-build-mode) instance.
     [Test]
     public void Copy_of_empty_committed_instance_yields_an_independent_empty_copy()
     {

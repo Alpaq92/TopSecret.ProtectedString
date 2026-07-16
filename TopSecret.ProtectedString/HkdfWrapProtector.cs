@@ -51,10 +51,10 @@ internal sealed class HkdfWrapProtector : KeyAtRestProtector, IDisposable
 
     private static HkdfWrapProtector CreateOrThrow(byte[] master)
     {
-        var wrapKey = GC.AllocateArray<byte>(MasterKeySize, pinned: true);
-        var wrapped = GC.AllocateArray<byte>(MasterKeySize, pinned: true);
-        if (!MemoryLocker.TryLock(wrapKey)) HardeningPolicy.OnFailure("memory locking obscurity wrap key");
-        if (!MemoryLocker.TryLock(wrapped)) HardeningPolicy.OnFailure("memory locking obscurity wrapped blob");
+        var wrapKey = ProtectedString.AllocatePinnedBytes(
+            MasterKeySize, excludeFromDumps: true, lockContext: "memory locking obscurity wrap key");
+        var wrapped = ProtectedString.AllocatePinnedBytes(
+            MasterKeySize, lockContext: "memory locking obscurity wrapped blob");
 
         bool committed = false;
         try
@@ -104,8 +104,8 @@ internal sealed class HkdfWrapProtector : KeyAtRestProtector, IDisposable
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
 
-        var unwrapped = GC.AllocateArray<byte>(MasterKeySize, pinned: true);
-        if (!MemoryLocker.TryLock(unwrapped)) HardeningPolicy.OnFailure("memory locking unwrapped key");
+        var unwrapped = ProtectedString.AllocatePinnedBytes(
+            MasterKeySize, excludeFromDumps: true, lockContext: "memory locking unwrapped key");
 
         bool ok = false;
         try

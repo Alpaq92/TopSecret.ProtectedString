@@ -292,11 +292,8 @@ internal sealed class LinuxTpmProtector : KeyAtRestProtector, IDisposable
             new SchemeOaep(TpmAlgId.Sha256),
             Array.Empty<byte>());
 
-        var pinned = GC.AllocateArray<byte>(plaintext.Length, pinned: true);
-        if (plaintext.Length > 0 && !MemoryLocker.TryLock(pinned))
-        {
-            HardeningPolicy.OnFailure("memory locking unwrapped key");
-        }
+        var pinned = ProtectedString.AllocatePinnedBytes(
+            plaintext.Length, excludeFromDumps: true, lockContext: "memory locking unwrapped key");
 
         bool ok = false;
         try

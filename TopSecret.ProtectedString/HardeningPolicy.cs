@@ -16,6 +16,21 @@ internal static class HardeningPolicy
     private static int s_warningLogged;
 
     /// <summary>
+    /// Applies the full hardening sequence to a caller-supplied pinned
+    /// buffer — lock into resident memory, exclude from crash dumps —
+    /// routing each failure through <see cref="OnFailure"/>. The allocating
+    /// sibling is <c>ProtectedString.AllocatePinnedBytes</c>; this overload
+    /// exists for buffers the caller had to allocate itself (e.g. a master
+    /// key array whose ownership is being transferred).
+    /// </summary>
+    public static void LockAndExclude(byte[] buffer, string lockContext)
+    {
+        if (buffer.Length == 0) return;
+        if (!MemoryLocker.TryLock(buffer)) OnFailure(lockContext);
+        if (!DumpExclusion.TryExclude(buffer)) OnFailure("core-dump exclusion");
+    }
+
+    /// <summary>
     /// Applies <see cref="ProtectedStringOptions.MemoryLockingFailureBehavior"/>
     /// to a hardening primitive failure. <paramref name="primitive"/> is a
     /// short noun phrase describing what failed (e.g.,

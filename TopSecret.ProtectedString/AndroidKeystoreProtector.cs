@@ -340,9 +340,8 @@ internal sealed class AndroidKeystoreProtector : KeyAtRestProtector, IDisposable
             // Promote into a pinned, locked buffer so the rest of the library
             // can wipe it deterministically. The transient byte[] returned by
             // DoFinal is on the regular managed heap and can move under the GC.
-            var pinned = GC.AllocateArray<byte>(unwrapped.Length, pinned: true);
-            if (!MemoryLocker.TryLock(pinned))
-                HardeningPolicy.OnFailure("memory locking unwrapped key");
+            var pinned = ProtectedString.AllocatePinnedBytes(
+                unwrapped.Length, excludeFromDumps: true, lockContext: "memory locking unwrapped key");
 
             bool ok = false;
             try

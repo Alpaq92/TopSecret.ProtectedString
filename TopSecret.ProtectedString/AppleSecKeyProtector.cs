@@ -229,10 +229,10 @@ internal sealed class AppleSecKeyProtector : KeyAtRestProtector, IDisposable
             }
 
             int len = checked((int)Native.CFDataGetLength(decrypted));
-            unwrapped = GC.AllocateArray<byte>(len, pinned: true);
-            // Best-effort lock — fold into the same policy as the rest of the
-            // hardening surface.
-            if (!MemoryLocker.TryLock(unwrapped)) HardeningPolicy.OnFailure("memory locking unwrapped key");
+            // Best-effort lock + dump-exclude — same policy as the rest of
+            // the hardening surface.
+            unwrapped = ProtectedString.AllocatePinnedBytes(
+                len, excludeFromDumps: true, lockContext: "memory locking unwrapped key");
 
             Native.CFDataCopyToBuffer(decrypted, unwrapped);
             ok = true;

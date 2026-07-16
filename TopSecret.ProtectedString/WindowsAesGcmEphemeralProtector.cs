@@ -62,10 +62,10 @@ internal sealed class WindowsAesGcmEphemeralProtector : KeyAtRestProtector, IDis
 
     private static WindowsAesGcmEphemeralProtector CreateOrThrow(byte[] master)
     {
-        var wrapKey = GC.AllocateArray<byte>(WrapKeySize, pinned: true);
-        var envelope = GC.AllocateArray<byte>(EnvelopeSize, pinned: true);
-        if (!MemoryLocker.TryLock(wrapKey)) HardeningPolicy.OnFailure("memory locking AES-GCM wrap key");
-        if (!MemoryLocker.TryLock(envelope)) HardeningPolicy.OnFailure("memory locking AES-GCM envelope");
+        var wrapKey = ProtectedString.AllocatePinnedBytes(
+            WrapKeySize, excludeFromDumps: true, lockContext: "memory locking AES-GCM wrap key");
+        var envelope = ProtectedString.AllocatePinnedBytes(
+            EnvelopeSize, lockContext: "memory locking AES-GCM envelope");
 
         bool committed = false;
         try
@@ -106,8 +106,8 @@ internal sealed class WindowsAesGcmEphemeralProtector : KeyAtRestProtector, IDis
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
 
-        var unwrapped = GC.AllocateArray<byte>(MasterKeySize, pinned: true);
-        if (!MemoryLocker.TryLock(unwrapped)) HardeningPolicy.OnFailure("memory locking unwrapped key");
+        var unwrapped = ProtectedString.AllocatePinnedBytes(
+            MasterKeySize, excludeFromDumps: true, lockContext: "memory locking unwrapped key");
 
         bool ok = false;
         try

@@ -43,6 +43,17 @@ public abstract class KeyAtRestProtector
     /// hardware-backed implementations.
     /// </summary>
     public abstract KeyAccessor UnwrapKey();
+
+    /// <summary>
+    /// Holder count maintained by <see cref="ProtectorLifetime"/> — internal
+    /// lifetime bookkeeping, not part of the protector contract. Lives on
+    /// the protector itself (rather than a side table) so AddRef/Release are
+    /// bare Interlocked operations.
+    /// </summary>
+    internal int LifetimeHolderCount;
+
+    /// <summary>Set once this protector has been rotated out; see <see cref="ProtectorLifetime.MarkSuperseded"/>.</summary>
+    internal volatile bool LifetimeSuperseded;
 }
 
 /// <summary>
@@ -103,12 +114,11 @@ public sealed class KeyAccessor : IDisposable
 /// without copying. <see cref="Dispose"/> zeros that array in place, which
 /// invalidates every outstanding <see cref="KeyAccessor"/> that came from
 /// this protector. Production code never reaches this from a live code
-/// path: the only Dispose paths are
-/// <see cref="ProtectedString.RotateProcessKey"/> (which deliberately
-/// leaves orphans alive — see the comment in
-/// <see cref="ProtectedString"/>'s <c>RotateInternal</c>) and the GC
-/// finalizer (which only fires when no <see cref="KeyAccessor"/> from
-/// this protector is reachable). If you ever construct a
+/// path: Dispose fires via <see cref="ProtectorLifetime"/> only after a
+/// rotation superseded this protector <i>and</i> the last holder
+/// (<see cref="ProtectedString"/> / <c>ProtectedBlob</c> instance) released
+/// it — at which point no operation can be in flight — or from the GC
+/// finalizer safety net. If you ever construct a
 /// <see cref="NoopKeyAtRestProtector"/> by hand and call Dispose, do it
 /// after every accessor it issued has been disposed.
 /// </para>
@@ -122,15 +132,21 @@ internal sealed class NoopKeyAtRestProtector : KeyAtRestProtector, IDisposable
     {
         _master = master;
 
-        // Lock the master into resident memory once. Any failure applies the
-        // user-configured policy (Throw / LogWarning / Ignore) via HardeningPolicy.
-        if (master.Length > 0 && !MemoryLocker.TryLock(master))
-        {
-            HardeningPolicy.OnFailure("memory locking the master AES key");
-        }
+        // Lock the master into resident memory and dump-exclude it once. Any
+        // failure applies the user-configured policy (Throw / LogWarning /
+        // Ignore) via HardeningPolicy.
+        HardeningPolicy.LockAndExclude(master, "memory locking the master AES key");
     }
 
-    public override KeyAccessor UnwrapKey() => KeyAccessor.Persistent(_master);
+    public override KeyAccessor UnwrapKey()
+    {
+        // Load-bearing since ProtectorLifetime made disposal deterministic:
+        // without this guard a lifetime-accounting bug would hand back the
+        // zeroed master and encrypt silently under an all-zero key instead
+        // of failing loudly.
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        return KeyAccessor.Persistent(_master);
+    }
 
     public void Dispose()
     {

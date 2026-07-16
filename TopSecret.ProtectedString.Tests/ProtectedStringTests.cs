@@ -721,7 +721,7 @@ public class ProtectedStringTests
     /// <c>AlwaysThrowingProtector</c>. This keeps the reference-equality
     /// check inside <c>RotateInternal.toMigrate</c> happy so our instance
     /// is actually selected for migration, and the migration's
-    /// <c>DecryptUnsafe</c> call then throws on <c>UnwrapKey</c>.
+    /// <c>DecryptInto</c> call then throws on <c>UnwrapKey</c>.
     /// The original <c>s_keyProtector</c> is restored in <c>finally</c>
     /// so subsequent tests are not affected. <see cref="NonParallelizableAttribute"/>
     /// because the test mutates process-wide
@@ -1085,7 +1085,7 @@ public class ProtectedStringTests
     public void WriteUtf8To_throws_on_null_or_unwritable_stream()
     {
         using var ps = new ProtectedString("x".AsSpan());
-        Assert.Throws<ArgumentNullException>(() => ps.WriteUtf8To(null!));
+        Assert.Throws<ArgumentNullException>(() => ps.WriteUtf8To((Stream)null!));
 
         using var unwritable = new MemoryStream(new byte[10], writable: false);
         Assert.Throws<ArgumentException>(() => ps.WriteUtf8To(unwritable));

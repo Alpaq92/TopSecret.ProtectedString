@@ -74,8 +74,6 @@ internal sealed class TtlCachingKeyAtRestProtector : KeyAtRestProtector, IDispos
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
 
-        byte[] snapshot;
-        int snapshotLength;
         lock (_cacheLock)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
@@ -86,32 +84,34 @@ internal sealed class TtlCachingKeyAtRestProtector : KeyAtRestProtector, IDispos
                 Refresh(nowMs);
             }
 
-            snapshot = _cachedKey!;
-            snapshotLength = snapshot.Length;
-        }
+            // Hand back an ephemeral copy so the caller's existing
+            // KeyAccessor.Dispose contract holds (zero + unlock on dispose)
+            // and we never expose the long-lived cache buffer to caller
+            // code. Both the allocation and the copy stay under _cacheLock:
+            // the wipe timer zeroes _cachedKey in place, so copying outside
+            // the lock could hand the caller an all-zero or torn key when
+            // the TTL expires in exactly that window — a silent
+            // encrypt-under-wrong-key data-loss path. Refresh already
+            // allocates under this lock, so the cost profile is unchanged.
+            var snapshot = _cachedKey!;
+            int snapshotLength = snapshot.Length;
+            var ephemeral = ProtectedString.AllocatePinnedBytes(
+                snapshotLength, excludeFromDumps: true, lockContext: "memory locking unwrapped key");
 
-        // Hand back an ephemeral copy so the caller's existing
-        // KeyAccessor.Dispose contract holds (zero + unlock on dispose) and
-        // we never expose the long-lived cache buffer to caller code.
-        var ephemeral = GC.AllocateArray<byte>(snapshotLength, pinned: true);
-        if (snapshotLength > 0 && !MemoryLocker.TryLock(ephemeral))
-        {
-            HardeningPolicy.OnFailure("memory locking unwrapped key");
-        }
-
-        bool ok = false;
-        try
-        {
-            Array.Copy(snapshot, ephemeral, snapshotLength);
-            ok = true;
-            return KeyAccessor.Ephemeral(ephemeral);
-        }
-        finally
-        {
-            if (!ok && snapshotLength > 0)
+            bool ok = false;
+            try
             {
-                CryptographicOperations.ZeroMemory(ephemeral);
-                MemoryLocker.TryUnlock(ephemeral);
+                Array.Copy(snapshot, ephemeral, snapshotLength);
+                ok = true;
+                return KeyAccessor.Ephemeral(ephemeral);
+            }
+            finally
+            {
+                if (!ok && snapshotLength > 0)
+                {
+                    CryptographicOperations.ZeroMemory(ephemeral);
+                    MemoryLocker.TryUnlock(ephemeral);
+                }
             }
         }
     }
@@ -123,11 +123,8 @@ internal sealed class TtlCachingKeyAtRestProtector : KeyAtRestProtector, IDispos
 
         using var unwrapped = _inner.UnwrapKey();
         int len = unwrapped.Key.Length;
-        var fresh = GC.AllocateArray<byte>(len, pinned: true);
-        if (len > 0 && !MemoryLocker.TryLock(fresh))
-        {
-            HardeningPolicy.OnFailure("memory locking cached unwrapped key");
-        }
+        var fresh = ProtectedString.AllocatePinnedBytes(
+            len, excludeFromDumps: true, lockContext: "memory locking cached unwrapped key");
 
         bool ok = false;
         try
