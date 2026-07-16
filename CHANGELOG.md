@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.3.0](https://github.com/Alpaq92/TopSecret.ProtectedString/compare/v2.2.1...v2.3.0) (2026-07-16)
+
+
+### Features
+
+* **analyzers:** TPS003 flags ToArray plaintext copies; TPS001 covers Encoding.GetString and string.Create ([0168ad9](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/0168ad9a435b0876ee1ec03ae94806f7319d4155))
+* **security:** locked-scratch pool, crash-dump exclusion, deterministic protector disposal, and byte-oriented APIs ([738ab02](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/738ab0209b504fa3f8e8deff32ba8cc1ee8c12bc))
+
 ## [2.2.1](https://github.com/Alpaq92/TopSecret.ProtectedString/compare/v2.2.0...v2.2.1) (2026-07-11)
 
 
