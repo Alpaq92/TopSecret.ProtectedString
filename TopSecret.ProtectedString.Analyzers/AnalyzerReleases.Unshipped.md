@@ -31,3 +31,4 @@ Rule ID | Category | Severity | Notes
 --------|----------|----------|--------
 TPS001  | Security | Warning  | Plaintext copied into a managed string inside ProtectedString.Access
 TPS002  | Security | Warning  | ProtectedString.Access plaintext array reference escapes the callback
+TPS003  | Security | Warning  | Plaintext copied into a new array inside ProtectedString.Access

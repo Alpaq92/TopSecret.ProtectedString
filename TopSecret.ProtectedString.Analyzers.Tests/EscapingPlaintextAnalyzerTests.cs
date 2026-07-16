@@ -486,6 +486,238 @@ public class EscapingPlaintextAnalyzerTests
         AssertDiagnosticIds(d /* no expected diagnostics */);
     }
 
+    // ---- TPS001: Encoding.GetString over the plaintext ------------------
+
+    [Test]
+    public async Task TPS001_fires_on_Encoding_GetString_over_span_param()
+    {
+        // Encoding.GetString decodes the plaintext bytes straight into a
+        // managed string — the same escape class as new string(plain).
+        // The analyzer must see through MemoryMarshal.AsBytes, which is
+        // just a reinterpreted span over the same memory.
+        var d = await RunAsync("""
+            using System;
+            using System.Runtime.InteropServices;
+            using System.Text;
+            using TopSecret;
+            class C
+            {
+                void M(ProtectedString ps)
+                {
+                    ps.Access((ReadOnlySpan<char> plain) =>
+                    {
+                        var leak = Encoding.Unicode.GetString(MemoryMarshal.AsBytes(plain));
+                        System.GC.KeepAlive(leak);
+                    });
+                }
+            }
+            """);
+        AssertDiagnosticIds(d, "TPS001");
+    }
+
+    [Test]
+    public async Task TPS001_fires_on_Encoding_GetString_over_array_param_via_AsSpan()
+    {
+        // Same sink through the char[] overload, wrapped twice:
+        // plain.AsSpan() then MemoryMarshal.AsBytes(...). Both wrappers
+        // are spans over the original plaintext, so the copy-to-string
+        // still leaks it.
+        var d = await RunAsync("""
+            using System;
+            using System.Runtime.InteropServices;
+            using System.Text;
+            using TopSecret;
+            class C
+            {
+                void M(ProtectedString ps)
+                {
+            #pragma warning disable CS0618
+                    ps.Access((char[] plain) =>
+                    {
+                        var leak = Encoding.Unicode.GetString(MemoryMarshal.AsBytes(plain.AsSpan()));
+                        System.GC.KeepAlive(leak);
+                    });
+            #pragma warning restore CS0618
+                }
+            }
+            """);
+        AssertDiagnosticIds(d, "TPS001");
+    }
+
+    [Test]
+    public async Task No_TPS001_when_Encoding_GetString_decodes_unrelated_buffer()
+    {
+        // Decoding some other buffer inside the Access window is a
+        // legitimate operation — only the plaintext parameter (or a span
+        // over it) as an argument is flagged.
+        var d = await RunAsync("""
+            using System;
+            using System.Text;
+            using TopSecret;
+            class C
+            {
+                void M(ProtectedString ps)
+                {
+                    var greeting = new byte[] { 104, 105 };
+                    ps.Access((ReadOnlySpan<char> plain) =>
+                    {
+                        var s = Encoding.UTF8.GetString(greeting);
+                        System.GC.KeepAlive(s);
+                    });
+                }
+            }
+            """);
+        AssertDiagnosticIds(d /* no expected diagnostics */);
+    }
+
+    // ---- TPS001: string.Create with the plaintext as state --------------
+
+    [Test]
+    public async Task TPS001_fires_on_string_Create_with_plaintext_state()
+    {
+        // string.Create is a static method on System.String receiving the
+        // plaintext by value as its state argument — the entire point of
+        // the call is to bake that state into a managed string.
+        var d = await RunAsync("""
+            using System;
+            using TopSecret;
+            class C
+            {
+                string M(ProtectedString ps)
+                {
+            #pragma warning disable CS0618
+                    return ps.Access((char[] plain) =>
+                        string.Create(plain.Length, plain, (span, state) => state.CopyTo(span)));
+            #pragma warning restore CS0618
+                }
+            }
+            """);
+        AssertDiagnosticIds(d, "TPS001");
+    }
+
+    [Test]
+    public async Task TPS001_fires_on_string_Create_with_span_plaintext_state()
+    {
+        // The ReadOnlySpan overload can flow into string.Create too —
+        // string.Create<TState> allows ref struct state on modern TFMs.
+        var d = await RunAsync("""
+            using System;
+            using TopSecret;
+            class C
+            {
+                void M(ProtectedString ps)
+                {
+                    ps.Access((ReadOnlySpan<char> plain) =>
+                    {
+                        var leak = string.Create(plain.Length, plain, (span, state) => state.CopyTo(span));
+                        System.GC.KeepAlive(leak);
+                    });
+                }
+            }
+            """);
+        AssertDiagnosticIds(d, "TPS001");
+    }
+
+    [Test]
+    public async Task No_TPS001_when_string_Create_state_is_not_plaintext()
+    {
+        // string.Create with unrelated state inside an Access callback is
+        // a legitimate sink — only the plaintext parameter as an argument
+        // is flagged.
+        var d = await RunAsync("""
+            using System;
+            using TopSecret;
+            class C
+            {
+                void M(ProtectedString ps)
+                {
+                    ps.Access((ReadOnlySpan<char> plain) =>
+                    {
+                        var s = string.Create(3, 'x', (span, ch) => span.Fill(ch));
+                        System.GC.KeepAlive(s);
+                    });
+                }
+            }
+            """);
+        AssertDiagnosticIds(d /* no expected diagnostics */);
+    }
+
+    // ---- TPS003: plaintext copied into a fresh heap array ---------------
+
+    [Test]
+    public async Task TPS003_fires_on_ToArray_of_array_param()
+    {
+        // Enumerable.ToArray over the char[] parameter — a heap copy the
+        // library never zeroes.
+        var d = await RunAsync("""
+            using System.Linq;
+            using TopSecret;
+            class C
+            {
+                void M(ProtectedString ps)
+                {
+            #pragma warning disable CS0618
+                    ps.Access((char[] plain) =>
+                    {
+                        var copy = plain.ToArray();
+                        System.GC.KeepAlive(copy);
+                    });
+            #pragma warning restore CS0618
+                }
+            }
+            """);
+        AssertDiagnosticIds(d, "TPS003");
+    }
+
+    [Test]
+    public async Task TPS003_fires_on_ToArray_of_span_param()
+    {
+        // ReadOnlySpan<char>.ToArray() — the span itself cannot escape,
+        // but the copy it produces is an ordinary array that can.
+        var d = await RunAsync("""
+            using System;
+            using TopSecret;
+            class C
+            {
+                void M(ProtectedString ps)
+                {
+                    ps.Access((ReadOnlySpan<char> plain) =>
+                    {
+                        var copy = plain.ToArray();
+                        System.GC.KeepAlive(copy);
+                    });
+                }
+            }
+            """);
+        AssertDiagnosticIds(d, "TPS003");
+    }
+
+    [Test]
+    public async Task No_TPS003_when_ToArray_is_on_unrelated_collection()
+    {
+        // ToArray over some other collection inside the Access window
+        // does not touch the plaintext — must not fire.
+        var d = await RunAsync("""
+            using System;
+            using System.Collections.Generic;
+            using System.Linq;
+            using TopSecret;
+            class C
+            {
+                void M(ProtectedString ps)
+                {
+                    ps.Access((ReadOnlySpan<char> plain) =>
+                    {
+                        var digits = new List<int> { 1, 2, 3 };
+                        var copy = digits.ToArray();
+                        System.GC.KeepAlive(copy);
+                    });
+                }
+            }
+            """);
+        AssertDiagnosticIds(d /* no expected diagnostics */);
+    }
+
     [Test]
     public async Task No_TPS001_when_string_constructor_takes_char_only()
     {
