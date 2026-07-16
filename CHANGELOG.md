@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.3.1](https://github.com/Alpaq92/TopSecret.ProtectedString/compare/v2.3.0...v2.3.1) (2026-07-16)
+
+
+### Documentation
+
+* reflect crash-dump exclusion, locked-scratch pool, and SecureString bridge across the doc set ([79a491e](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/79a491e5bcad0b4368ef733b5cd6bb94cd3cc5d5))
+
 ## [2.3.0](https://github.com/Alpaq92/TopSecret.ProtectedString/compare/v2.2.1...v2.3.0) (2026-07-16)
 
 
