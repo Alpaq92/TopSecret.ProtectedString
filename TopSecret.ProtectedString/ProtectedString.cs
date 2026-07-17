@@ -509,6 +509,79 @@ public sealed class ProtectedString : IDisposable, IEquatable<ProtectedString>
     }
 
     /// <summary>
+    /// Decodes <paramref name="utf8"/> as UTF-8 and appends the resulting
+    /// characters — the input-side sibling of <see cref="WriteUtf8To(Stream)"/>
+    /// / <see cref="Utf8Access(ReadOnlySpanAction{byte})"/>. Lets a secret that
+    /// arrives as UTF-8 bytes (a JSON body, a network credential, a vault
+    /// response) enter the protected value without a managed <see cref="string"/>
+    /// or <see cref="char"/>[] detour: the decode target is pooled, locked,
+    /// wiped-on-return scratch.
+    /// </summary>
+    /// <exception cref="ObjectDisposedException">The instance has been disposed.</exception>
+    /// <exception cref="InvalidOperationException">The instance is read-only.</exception>
+    /// <exception cref="System.Text.DecoderFallbackException">
+    /// <paramref name="utf8"/> is not valid UTF-8.
+    /// </exception>
+    public void AppendUtf8(ReadOnlySpan<byte> utf8)
+    {
+        if (utf8.IsEmpty)
+        {
+            // Preserve the disposed / read-only contract even for an empty append.
+            lock (_sync)
+            {
+                ThrowIfDisposed();
+                if (_readOnly) throw new InvalidOperationException("ProtectedString is read-only.");
+            }
+            return;
+        }
+
+        // UTF-16 char count is always <= UTF-8 byte count, so size the scratch
+        // to the byte length and skip a separate counting pass — GetChars still
+        // strict-decodes (malformed UTF-8 throws rather than silently
+        // substituting U+FFFD, which would corrupt a secret without warning).
+        var lease = LockedScratchPool.Rent(checked(utf8.Length * 2));
+        try
+        {
+            var chars = lease.Chars(utf8.Length);
+            int written = s_strictUtf8.GetChars(utf8, chars);
+            AppendChars(chars[..written]);
+        }
+        finally
+        {
+            lease.Return();
+        }
+    }
+
+    /// <summary>UTF-8 codec that throws on malformed input instead of substituting replacement characters.</summary>
+    private static readonly UTF8Encoding s_strictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
+
+    /// <summary>
+    /// Creates a read-only <see cref="ProtectedString"/> from UTF-8 bytes with
+    /// no intermediate managed <see cref="string"/> — the input-side factory
+    /// for secrets that arrive as UTF-8. Equivalent to
+    /// <c>new ProtectedString()</c> + <see cref="AppendUtf8"/> +
+    /// <see cref="MakeReadOnly"/>.
+    /// </summary>
+    /// <exception cref="System.Text.DecoderFallbackException">
+    /// <paramref name="utf8"/> is not valid UTF-8.
+    /// </exception>
+    public static ProtectedString FromUtf8(ReadOnlySpan<byte> utf8)
+    {
+        var ps = new ProtectedString();
+        try
+        {
+            ps.AppendUtf8(utf8);
+            ps.MakeReadOnly();
+            return ps;
+        }
+        catch
+        {
+            ps.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>
     /// Allocates a pinned/locked build buffer of at least
     /// <paramref name="minimumCapacity"/> characters, decrypting any existing
     /// ciphertext into the front of it. Caller holds <see cref="_sync"/>.
