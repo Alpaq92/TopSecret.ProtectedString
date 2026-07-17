@@ -54,7 +54,7 @@ Two front-line packages ship from this repo and cover the two ends of the spectr
   - [What this library does **not** do (and why)](#what-this-library-does-not-do-and-why)
   - [Key-at-rest wrapping (opt-in, tiered)](#key-at-rest-wrapping-opt-in-tiered)
   - [Diagnostics](#diagnostics)
-  - [Build-time analyzer (TPS001 / TPS002)](#build-time-analyzer-tps001--tps002)
+  - [Build-time analyzer](#build-time-analyzer)
   - [Process-key rotation (opt-in)](#process-key-rotation-opt-in)
   - [Memory-locking policy](#memory-locking-policy)
     - [Crash-dump exclusion](#crash-dump-exclusion)
@@ -74,6 +74,7 @@ Two front-line packages ship from this repo and cover the two ends of the spectr
   - [Option 2 — manual binding (zero extra dependency)](#option-2--manual-binding-zero-extra-dependency)
   - [Hot-reload semantics](#hot-reload-semantics)
   - [Why static, not `IOptions<T>`?](#why-static-not-ioptionst)
+- [Binding a secret from JSON](#binding-a-secret-from-json)
 - [FAQ](#faq)
 - [Development](#development)
   - [Maintainer notes — version pins worth knowing](#maintainer-notes--version-pins-worth-knowing)
@@ -168,7 +169,7 @@ bool ok = attempt.VerifyArgon2idHash(stored, salt);
 
 `ProtectedString` deliberately offers no `ToManagedString()` — once a secret has been hashed into a `string`, the runtime may intern, deduplicate, or copy it across GC cycles in ways nothing in user code can erase. The cookbook below works through the cases where you reach for `string` in idiomatic .NET; pick the one that fits your boundary.
 
-The general rule: **prefer streaming sinks** (`WriteUtf8To` / `CopyTo`) when the API exposes a `Stream` / `Span<char>` / `byte[]`, and **materialize inside `Access` then suppress [TPS001](#build-time-analyzer-tps001--tps002) narrowly** when the BCL truly forces a `string` — the analyzer exists to make sure you reach for that escape hatch deliberately.
+The general rule: **prefer streaming sinks** (`WriteUtf8To` / `CopyTo`) when the API exposes a `Stream` / `Span<char>` / `byte[]`, and **materialize inside `Access` then suppress [TPS001](#build-time-analyzer) narrowly** when the BCL truly forces a `string` — the analyzer exists to make sure you reach for that escape hatch deliberately.
 
 `ToString()` deliberately does **not** include the plaintext — it returns `ProtectedString[length=N]` so that accidental logging is safe.
 
@@ -437,6 +438,8 @@ It also opts into `KeyAtRestProtection.HardwareBackedPreferred` at startup so th
 | `WriteUtf8To(IBufferWriter<byte> destination)` | Encode the plaintext as UTF-8 directly into the writer's buffer via `GetSpan` — zero intermediate copies. The writer owns (and is responsible for clearing) its backing memory, same boundary contract as the `Stream` overload. |
 | `Utf8Access(ReadOnlySpanAction<byte>)` / `Utf8Access<T>(ReadOnlySpanFunc<byte, T>)` | The byte-oriented sibling of `Access`: run a callback against the plaintext encoded as UTF-8 in locked, wiped-on-exit scratch. For consumers that want bytes — Basic-auth credentials, KDF inputs, `Utf8JsonWriter` values. |
 | `AppendChars(ReadOnlySpan<char>)` | Bulk sibling of `AppendChar` — one capacity check and one copy for the whole span. Same build-mode semantics. |
+| `AppendUtf8(ReadOnlySpan<byte>)` | Decode UTF-8 bytes and append them — the input-side sibling of `WriteUtf8To`/`Utf8Access`. The decode target is pooled, locked, wiped scratch, so a secret arriving as UTF-8 enters without a managed `string`/`char[]` detour. |
+| `static FromUtf8(ReadOnlySpan<byte>)` | Build a read-only instance from UTF-8 bytes with no intermediate managed `string`. Equivalent to `new ProtectedString()` + `AppendUtf8` + `MakeReadOnly`. See [Binding a secret from JSON](#binding-a-secret-from-json) for the `System.Text.Json` companion built on this. |
 | `ToSecureString()` *(extension, `SecureStringInterop`)* | Single-copy bridge for APIs whose signatures demand a genuine `SecureString` (`SqlCredential`, `PSCredential`) — built under `fixed` via the unsafe `SecureString(char*, int)` constructor, returned read-only. See [ADO.NET — `SqlCredential` and connection strings](#adonet--sqlcredential-and-connection-strings) for lifetime guidance. |
 | `Copy()` | Independent, writable copy. |
 | `Equals(ProtectedString)` | Constant-time comparison. (`Equals(object?)` is a one-line override that defers to this; same behavior.) |
@@ -510,7 +513,7 @@ The API was deliberately shaped after Evolveum's [`GuardedString`](#inspiration)
 | **Key scope** | Static process-wide `Encryptor` from `EncryptorFactory.newRandomEncryptor()`. Random per JVM. | Static process-wide 32-byte master, lazily initialised. Random per process. |
 | **Where bytes live** | Plain `byte[] encryptedBytes` on the Java heap — relocatable by the GC, no `mlock`. | Pinned object heap; plaintext and key buffers `VirtualLock`ed / `mlock`ed with a configurable [failure policy](#memory-locking-policy). |
 | **Cross-instance binding** | None — ciphertext from one instance can be swapped onto another and decrypts cleanly. | Per-instance 64-bit id passed as AEAD associated data; tag check fails on cross-instance swap. |
-| **Plaintext access** | `access(Accessor)` — single shape, void-returning callback. Buffer zeroed on return via `SecurityUtil.clear`. | `Access(ReadOnlySpanAction<char>)` plus `Access<T>(ReadOnlySpanFunc<char, T>)`; the span is a `ref struct` the compiler refuses to let escape. Buffer wiped on return. Sinks (`CopyTo(Span<char>)`, `WriteUtf8To(Stream)`) plus a [build-time analyzer](#build-time-analyzer-tps001--tps002) catch the common copy patterns. |
+| **Plaintext access** | `access(Accessor)` — single shape, void-returning callback. Buffer zeroed on return via `SecurityUtil.clear`. | `Access(ReadOnlySpanAction<char>)` plus `Access<T>(ReadOnlySpanFunc<char, T>)`; the span is a `ref struct` the compiler refuses to let escape. Buffer wiped on return. Sinks (`CopyTo(Span<char>)`, `WriteUtf8To(Stream)`) plus a [build-time analyzer](#build-time-analyzer) catch the common copy patterns. |
 | **Equality** | Compares **stored Base64-SHA-1 hashes** of the plaintext — fast, but the hash sits in memory next to the ciphertext, and `String.equals` is not constant-time. SHA-1 is broken for collision resistance. | `CryptographicOperations.FixedTimeEquals` over freshly decrypted plaintext, with deadlock-free lock ordering (see [Security model](#what-this-library-does)). |
 | **`hashCode`** | `base64SHA1Hash.hashCode()` — derived from the *content*. The SHA-1 of the secret is held in process memory. | `_length` only — never derived from plaintext, so dictionary buckets cannot reveal anything about the secret. |
 | **Credential KDF** | `verifyBase64SHA1Hash(String)` — single-round SHA-1, no salt, no work factor. Useful as a probabilistic equality check; **not** safe as a password verifier. | `ComputeArgon2idHash` / `VerifyArgon2idHash` with OWASP-aligned defaults (see [API surface](#api-surface)) and constant-time verify. |
@@ -547,10 +550,12 @@ This is a best-effort defence against **accidental** memory disclosure (heap dum
 - **Build-mode buffer for `AppendChar`.** See the [API surface](#api-surface) entry for the geometric-growth / single-encryption-on-`MakeReadOnly` shape and the trade-off (plaintext lives in pinned/locked memory during build).
 - **Memory locking.** Every plaintext- and key-bearing buffer is `VirtualLock`/`mlock`'d, with the hot per-operation scratch served from a page-aligned locked pool — see [Memory-locking policy](#memory-locking-policy).
 - **Crash-dump exclusion.** The same plaintext and key buffers are excluded from OS crash dumps where the platform offers a primitive — WER dumps on Windows, kernel core dumps on Linux/Android — see [Crash-dump exclusion](#crash-dump-exclusion) for exact coverage and honest limits.
+- **Fork hardening.** The locked-scratch slabs and the guarded master page are marked `madvise(MADV_WIPEONFORK)` on Linux/Android (4.14+), so a forked child reads zeros in place of inherited secrets. Best-effort; a no-op elsewhere.
+- **Master-key wrapping, tiered (opt-in default from 2.4).** The per-process master is `Obscurity`-wrapped by default; opt up to `GuardedPage` (the master lives on a no-access page that *faults* a passive scan between operations — the first tier that raises the bar against an in-process reader) or the hardware-backed tiers. See [Key-at-rest wrapping](#key-at-rest-wrapping-opt-in-tiered).
 - **Constant-time compare with deadlock-free lock ordering.** `CryptographicOperations.FixedTimeEquals` for plaintext equality and Argon2id verification. Concurrent `a.Equals(b)` / `b.Equals(a)` calls take the two instance locks in order of monotonic 64-bit ids (`Interlocked.Increment`) — deadlock-free, and unlike a `RuntimeHelpers.GetHashCode`-based ordering it has no 32-bit collision risk.
 - **`Dispose` + finalizer.** `Dispose` zeros ciphertext / nonce / tag and any in-flight build buffer; a finalizer covers the forget-to-dispose case.
 - **Logging-safe `ToString()`.** Returns `ProtectedString[length=N]`, never the plaintext.
-- **Build-time analyzer (TPS001 / TPS002).** Flags plaintext copied or captured out of `Access` callbacks at compile time. Defence-in-depth, not a substitute for the structural protection the `ReadOnlySpan` overload provides — triggers, suppression, and packaging in [Build-time analyzer](#build-time-analyzer-tps001--tps002).
+- **Build-time analyzer (TPS001–TPS003).** Flags plaintext copied or captured out of `Access` callbacks at compile time — into a `string`, a captured `char[]`, or a `ToArray()` copy. Defence-in-depth, not a substitute for the structural protection the `ReadOnlySpan` overload provides — triggers, suppression, and packaging in [Build-time analyzer](#build-time-analyzer).
 
 ### What this library does **not** do (and why)
 
@@ -559,20 +564,25 @@ This is a best-effort defence against **accidental** memory disclosure (heap dum
 
 ### Key-at-rest wrapping (opt-in, tiered)
 
-By default the per-process AES master key sits plaintext in pinned, locked, dump-excluded memory for the lifetime of the process. Set `ProtectedStringOptions.KeyAtRestProtection` to wrap that master with progressively stronger primitives.
+Set `ProtectedStringOptions.KeyAtRestProtection` to control how the per-process AES master key is held at rest, from a plaintext (locked, dump-excluded) buffer up through hardware-backed wrapping.
+
+> **Default changed in 2.4.** The default is now `Obscurity` (was `None`) — the master is software-wrapped out of the box, forcing a passive scanner to find *and* combine two buffers rather than lifting one. Set `KeyAtRestProtection = None` explicitly if you need the old zero-overhead plaintext-master posture.
 
 The headline decision is **fail-closed vs fall-back**: `HardwareBackedRequired` fails closed — `PlatformNotSupportedException` at the first construction on a host with no hardware-backed provider, deliberately ignoring `MemoryLockingFailureBehavior`, because silently downgrading a hard security request defeats the point — while `HardwareBackedPreferred` falls back silently (hardware → obscurity → none). Details in [Failure behaviour](#failure-behaviour).
 
 > **All `ProtectedStringOptions` are read once at first construction.** Set them in your composition root before any `ProtectedString` is constructed — see [Hot-reload semantics](#hot-reload-semantics) for the per-key matrix and [`RotateProcessKey()`](#process-key-rotation-opt-in) for runtime protector swap.
 
-The option has four values:
+The option has five values, in increasing strength:
 
 | Value | What happens | Per-op cost |
 | --- | --- | --- |
-| `None` *(default)* | No wrapping. Master sits in pinned/locked memory. | None |
-| `Obscurity` | Software wrap only — AES-GCM-256 under a per-protector random key on Windows; HKDF stream-XOR everywhere else. Defeats casual scrapers but both wrap key and ciphertext live in the process heap — an attacker who can dump the process and knows the layout still wins. For real passive-dump resistance, use the hardware-backed tier. | ~µs |
+| `None` | No wrapping. Master sits in pinned/locked/dump-excluded memory for the process lifetime. | None |
+| `Obscurity` *(default)* | Software wrap only — AES-GCM-256 under a per-protector random key on Windows; HKDF stream-XOR everywhere else. Defeats casual scrapers but both wrap key and ciphertext live in the process heap — an attacker who can dump the process and knows the layout still wins. | ~µs |
+| `GuardedPage` | The master lives on its own dedicated OS page mapping (`VirtualAlloc` / `mmap`, never a heap block) marked no-access (`PAGE_NOACCESS` / `PROT_NONE`) except during the brief window of a key unwrap, so a passive scan **faults** on the key page between operations instead of reading it. The strongest software-only posture — the first tier that raises the bar against an in-process reader, not just a scheme-blind scraper. Falls back to `Obscurity` where page protection is unavailable (browser-wasm) or the initial seal fails under a non-`Throw` policy — the *stronger* fallback (Obscurity wraps the key), never a silent drop to a readable page. | Page-protect syscall pair + 32-byte copy per unwrap; amortize with [`UnwrappedKeyCacheTtl`](#hot-reload-semantics) |
 | `HardwareBackedRequired` | Hardware-resident wrap key only — **fails closed** with `PlatformNotSupportedException` at the first `ProtectedString` construction if no hardware-backed provider is available on this host (see above). | ~ms — varies by provider, see [Performance](#hardware-backed-tier) |
 | `HardwareBackedPreferred` | Best effort: try hardware → fall back to obscurity → fall back to no-op silently. The recommended setting when you want whatever protection the platform offers without hard failures. | Whatever the active tier costs |
+
+> **`GuardedPage` and the threat model.** It is the one tier that meaningfully narrows the window against an attacker with arbitrary process reads: between operations the only copy of the master faults on access. It does **not** close the in-flight window — during an unwrap the key is briefly copied into an ordinary (locked, dump-excluded) ephemeral, exactly as every wrapping tier does. Read [Threat model](#threat-model) before relying on it.
 
 Use `ProtectedString.HardwareBackedAvailability` in your composition root to branch deliberately. On Apple hosts the probe is destructive on first call (generates and discards a SEP-resident EC key) but cached for the process lifetime — see [Apple SEP availability](#apple-sep-availability) for which hosts have a Secure Enclave at all. On other platforms the probe inspects the registered providers without touching the secure hardware.
 
@@ -661,16 +671,17 @@ Most warnings fire at most once per process, gated by an `Interlocked.CompareExc
 | **Memory locking failure** | `VirtualLock` / `mlock` failed and `MemoryLockingFailureBehavior` is `LogWarning` (the default) | See [Memory-locking policy](#memory-locking-policy) — set the policy to `Throw` if paging-to-disk is in your threat model |
 | **Partial rotation failure** *(per-call, not one-shot)* | One or more live `ProtectedString` instances threw during their per-instance migration inside `RotateProcessKey()`. The unmigrated instances still reference the previous master and would be lost in a "rotate then dispose old key" workflow | Inspect the trace message for the failed-instance count; investigate why the per-instance protector's `UnwrapKey` is failing (TPM unavailable mid-rotation, custom protector throwing, etc.). Re-running `RotateProcessKey()` after the cause is fixed retries the migration |
 
-### Build-time analyzer (TPS001 / TPS002)
+### Build-time analyzer
 
 The NuGet ships a Roslyn analyzer (`TopSecret.ProtectedString.Analyzers.dll`, packaged at `analyzers/dotnet/cs/`) that flags the most common patterns where the plaintext made available inside a `ProtectedString.Access(...)` callback is copied or captured in a way that defeats the wipe-on-return guarantee.
 
-Two diagnostics ship:
+Three diagnostics ship:
 
 | ID | Severity | Triggers on |
 | --- | --- | --- |
-| **TPS001** | Warning | Plaintext copied into a managed `string` inside an `Access` callback — `new string(plain)`, `plain.ToString()`, `string.Concat(..., plain, ...)`, etc. Once the bytes have been hashed into a `string`, the runtime may intern, deduplicate, or copy them across GC cycles in ways nothing in user code can erase. |
+| **TPS001** | Warning | Plaintext copied into a managed `string` inside an `Access` callback — `new string(plain)`, `plain.ToString()`, `string.Concat(..., plain, ...)`, `string.Create(..., plain, ...)`, or `Encoding.*.GetString(...)` over the plaintext. Once the bytes have been hashed into a `string`, the runtime may intern, deduplicate, or copy them across GC cycles in ways nothing in user code can erase. |
 | **TPS002** | Warning | The `Action<char[]>` overload's parameter is assigned to a captured local, field, or property — i.e., the `char[]` reference outlives the callback. The library zeroes the array on return, so the retained reference observes a buffer of zeros at best. The `ReadOnlySpan<char>` overload makes this structurally impossible. |
+| **TPS003** | Warning | `plain.ToArray()` inside an `Access` callback — an ordinary heap array copy the library never zeroes, whose reference escapes the callback freely. Operate on the provided buffer in place, or (if a copy is truly needed) zero it yourself in a `finally`. |
 
 The diagnostics are warnings, not errors — the C# language cannot prevent intentional copying, and there are legitimate cases (passing the plaintext to an external API that demands a `string`). If you need to suppress one deliberately, do it locally with a justification:
 
@@ -683,10 +694,10 @@ ps.Access(plain => fido.AuthenticateWithUserVerification(new string(plain)));
 Disable globally in your csproj only if you have no callers that ought to be flagged:
 
 ```xml
-<NoWarn>$(NoWarn);TPS001;TPS002</NoWarn>
+<NoWarn>$(NoWarn);TPS001;TPS002;TPS003</NoWarn>
 ```
 
-The detection rules themselves are pinned by `TopSecret.ProtectedString.Analyzers.Tests`, which hosts the analyzer in-memory against a corpus of expected-violation snippets (TPS001 / TPS002 must fire) and expected-clean snippets (no diagnostic). That suite runs on every CI leg, so a regression that silently disables a detection rule fails the build instead of landing unobserved.
+The detection rules themselves are pinned by `TopSecret.ProtectedString.Analyzers.Tests`, which hosts the analyzer in-memory against a corpus of expected-violation snippets (TPS001–TPS003 must fire) and expected-clean snippets (no diagnostic). That suite runs on every CI leg, so a regression that silently disables a detection rule fails the build instead of landing unobserved.
 
 ### Process-key rotation (opt-in)
 
@@ -783,6 +794,16 @@ The master key sits in pinned, locked, dump-excluded memory. Per-op cost is domi
 
 **Why `Equals` decrypts both sides instead of comparing hashes.** Storing a hash of the secret next to the ciphertext is a leak surface (see [Compared to `GuardedString`](#where-the-gap-matters)). `ProtectedString` decrypts under each instance's per-instance AAD and `FixedTimeEquals`'s the plaintext. The cost is two AES-GCM decrypts; the gain is no plaintext-derived material between calls. Hot login paths see this every credential check — for those, prefer `ComputeArgon2idHash` + `VerifyArgon2idHash` against a stored hash.
 
+**Software key-at-rest tier cost.** Each `Access` unwraps the master once (no TTL cache), so the tier's per-unwrap cost shows up directly. Measured on one x64 dev host (`benchmarks/TopSecret.ProtectedString.Benchmarks`, BenchmarkDotNet — indicative, not a spec; reproduce on your own hardware):
+
+| Tier | `Access` mean | Δ vs `None` | Allocated |
+| --- | --- | --- | --- |
+| `None` | ~1.5 µs | — | 80 B |
+| `Obscurity` *(default)* | ~6.5 µs | +~5 µs (one HKDF derive + ephemeral) | 208 B |
+| `GuardedPage` | ~8.5 µs | +~7 µs (adds the page-protect syscall pair) | 168 B |
+
+All three are single-digit microseconds — the 2.4 default flip to `Obscurity` costs a few microseconds per unwrap, which [`UnwrappedKeyCacheTtl`](#hot-reload-semantics) amortizes to near-`None` on hot paths. The hardware-backed tier below is a different order of magnitude.
+
 ### Hardware-backed tier
 
 Each `Access`, `Equals`, `AppendChar`, and `Copy` round-trips through `UnwrapKey` once per call. The round-trip dominates the operation cost on a hot path:
@@ -801,6 +822,13 @@ For a per-request credential validation that goes through `Equals` or `Access`, 
 ### Argon2id (credential KDF)
 
 Argon2id is **intentionally slow** — that is its job as a password KDF. At the OWASP-aligned defaults (see [API surface](#api-surface) for the parameters), expect tens to low hundreds of milliseconds per hash on commodity hardware — and, on the browser-wasm runtime specifically, several seconds (see [`browser-wasm` support](#browser-wasm-support)). Tune via the explicit-parameter overload only if you understand the trade-off between attacker-cost and your own login-path latency.
+
+**Calibrating for your hardware.** OWASP's advice is "tune for your hardware," which almost nobody does. `Argon2Calibrator.Tune(TimeSpan target)` benchmarks the host and returns an `Argon2idCalibration` (`Iterations` / `MemoryKb` / `Parallelism` / the `Measured` latency it achieved) hitting your target per-hash latency — holding parallelism fixed and scaling memory, then iterations if the memory cap binds. It never drops below the OWASP floors. It's a **startup / ops helper**, not a hot-path API: it runs several real hashes, so run it once at deploy time on the target hardware and cache the result — dev-box numbers do not transfer to a differently-specced production host.
+
+```csharp
+var p = Argon2Calibrator.Tune(TimeSpan.FromMilliseconds(300)); // interactive-login target
+var hash = password.ComputeArgon2idHash(salt, p.Iterations, p.MemoryKb, p.Parallelism);
+```
 
 The API is deliberately **synchronous-only**, and works on every supported platform including `net10.0-browser`. An async shape (`ComputeArgon2idHashAsync`, awaiting the KDF instead of blocking) was prototyped as an *alternative* route to browser support and then **rejected after an adversarial review**: the sync method holds the per-instance lock for the whole KDF, and releasing that lock across an `await` demonstrably regresses three security invariants (overlapping KDF-lifetime pinned scratch copies under page-granular, non-refcounted `VirtualLock`/`mlock`; the loss of "`Dispose` returned ⇒ no library-held plaintext copy exists"; and a stale-verify linearization race). Restoring those invariants requires a per-instance async gate plus deadlock guards — more concurrency machinery than a security-critical type should carry. The sync API works in the browser today via a different fix, entirely inside the underlying Argon2 dependency — see below.
 
@@ -836,7 +864,7 @@ The main library targets `net10.0;net10.0-android;net10.0-ios;net10.0-macos;net1
 
 - **`TopSecret.ProtectedString.Tests`** — the cross-platform suite covering the public API, build mode, both `Access` overloads, sinks, rotation, memory locking, AES-GCM wire-format compatibility between the in-box `AesGcm` and BouncyCastle (the `net10.0-browser` shim's primitives), and an API-table drift guard that asserts every public member of `ProtectedString` is mentioned in the README's `## API surface` section.
 - **`TopSecret.ProtectedBlob.Tests`** — wire-format pinning (`WireFormatPinningTests` freezes the [wire format](#wire-format)), the tamper matrix (reorder / truncate / transplant / bit-flip), `FromStream` and chunk-boundary coverage, and an API-table drift guard against the README's ProtectedBlob API-surface table.
-- **`TopSecret.ProtectedString.Analyzers.Tests`** — hosts `EscapingPlaintextAnalyzer` against in-memory C# snippets and asserts on the diagnostics it emits. Both expected violations (TPS001 / TPS002 must fire) and expected-clean code (no diagnostic) are exercised. Without this leg, analyzer regressions are invisible: a broken detection rule "just works" until a user writes the missed pattern.
+- **`TopSecret.ProtectedString.Analyzers.Tests`** — hosts `EscapingPlaintextAnalyzer` against in-memory C# snippets and asserts on the diagnostics it emits. Both expected violations (TPS001–TPS003 must fire) and expected-clean code (no diagnostic) are exercised. Without this leg, analyzer regressions are invisible: a broken detection rule "just works" until a user writes the missed pattern.
 - **`TopSecret.ProtectedString.WindowsTpm.Tests`** — Windows-only smoke suite (self-skips on non-Windows hosts and on Windows hosts without a TPM).
 - **`TopSecret.ProtectedString.LinuxTpm.Tests`** — Linux smoke suite (self-skips on non-Linux hosts; on the Linux CI leg it runs against a `swtpm` software TPM 2.0 simulator for end-to-end coverage of the TSS.MSR call shape).
 
@@ -856,7 +884,7 @@ The `ci.yml` Linux leg additionally runs an AOT publish dry-run with warnings es
 
 ### Release & publishing flow
 
-`release.yml` produces five NuGet packages plus their `.snupkg` symbol packages:
+`release.yml` produces six NuGet packages plus their `.snupkg` symbol packages:
 
 | Package | Contents |
 | --- | --- |
@@ -864,9 +892,10 @@ The `ci.yml` Linux leg additionally runs an AOT publish dry-run with warnings es
 | `TopSecret.ProtectedString.WindowsTpm` | Optional Windows TPM 2.0 wrapping subpackage. |
 | `TopSecret.ProtectedString.LinuxTpm` | Optional Linux TPM 2.0 wrapping subpackage. |
 | `TopSecret.ProtectedString.Configuration` | Optional `appsettings.json` binder — a single extension method (`BindProtectedStringOptions`) that wraps the `Enum.TryParse` / `TimeSpan.TryParse` boilerplate. Takes a single dependency on `Microsoft.Extensions.Configuration.Abstractions` so the main package stays dependency-minimal. |
+| `TopSecret.ProtectedString.Json` | Optional `System.Text.Json` converter (`ProtectedStringJsonConverter`) that binds a JSON string straight into a `ProtectedString` with no managed `string`. Deserialization-only; no extra dependency (`System.Text.Json` is in the shared framework). |
 | `TopSecret.ProtectedBlob` | Large-secret-blob sibling — chunked AES-GCM-256 envelope for multi-MB byte blobs, key wrapped under the shared process master (see [ProtectedBlob](#protectedblob-large-secret-blobs)). Bundles the same analyzer at `analyzers/dotnet/cs/`. |
 
-Two packaging details worth knowing: all five packages share **one NuGet `README.md`** ([`docs/nuget/README.md`](docs/nuget/README.md) — pure markdown sized for the nuget.org landing page, since nuget.org strips raw HTML), while this root README stays the GitHub-only landing page. Icons are per-package — `assets/string/`, `assets/blob/`, and `assets/rest/` (see [Icon](#icon)).
+Two packaging details worth knowing: all six packages share **one NuGet `README.md`** ([`docs/nuget/README.md`](docs/nuget/README.md) — pure markdown sized for the nuget.org landing page, since nuget.org strips raw HTML), while this root README stays the GitHub-only landing page. Icons are per-package — `assets/string/`, `assets/blob/`, and `assets/rest/` (see [Icon](#icon)).
 
 Each release also redeploys the [live browser demo](https://alpaq92.github.io/TopSecret.ProtectedString/) via [`pages.yml`](.github/workflows/pages.yml).
 
@@ -982,13 +1011,34 @@ The library emits a one-shot [`Trace.TraceWarning`](#diagnostics) the first time
 
 `ProtectedStringOptions` is a static class because the AES master key it gates is **process-wide by design**: every `ProtectedString` in the process shares the same master, and `RotateProcessKey()` rotates that single master globally. A scope-aware options pattern would imply per-scope cryptographic state, which the library deliberately does not support. For genuine per-tenant secret isolation, run separate processes (or separate `AppDomain`s on legacy .NET Framework). The companion package's `BindProtectedStringOptions` is therefore explicit that it sets process-wide statics, rather than masquerading as a scope-friendly options binding.
 
+## Binding a secret from JSON
+
+The optional [`TopSecret.ProtectedString.Json`](https://www.nuget.org/packages/TopSecret.ProtectedString.Json) package binds a JSON string value straight into a `ProtectedString` via `System.Text.Json`, unescaping the token into pooled, locked, wiped scratch — the secret never materializes as a managed `string`. It's the deserialization sibling of the built-in [`WriteUtf8To`](#api-surface) output path.
+
+```csharp
+public sealed record Login
+{
+    public string User { get; init; } = "";
+
+    [JsonConverter(typeof(ProtectedStringJsonConverter))]
+    public ProtectedString? Password { get; init; }
+}
+
+var login = JsonSerializer.Deserialize<Login>(requestBody)!;
+// login.Password is a read-only ProtectedString; no plaintext string ever existed.
+```
+
+Register it per-property with `[JsonConverter(typeof(ProtectedStringJsonConverter))]`, or add `new ProtectedStringJsonConverter()` to `JsonSerializerOptions.Converters` to cover every `ProtectedString` in a graph.
+
+**Deserialization-only by design.** The converter's `Write` throws `NotSupportedException`: serializing a `ProtectedString` back out would materialize the plaintext as a JSON string, exactly the exposure the library avoids (see [FAQ #3](#3-can-i-serialize-a-protectedstring)). Getting a secret *into* protection at the JSON boundary is the supported direction; getting one out is not.
+
 ## FAQ
 
 #### 1. When is `ProtectedString` the right tool, and why should I use it?
 
 When you have a credential — a password, token, API key, or signing key — that has to **live across** an `await`, a request, or a process-wide cache. Anything sized like a credential, held longer than a single synchronous span.
 
-It encrypts the value at rest in process memory on every supported platform (including non-Windows, where `SecureString` does not), `mlock`s the buffers so the OS won't page them to disk, wipes on `Dispose`, survives [process-key rotation](#process-key-rotation-opt-in) without invalidating live instances, and ships a [build-time analyzer](#build-time-analyzer-tps001--tps002) that fails the build when plaintext escapes into a managed `string`. See [Security model](#security-model) for the full picture.
+It encrypts the value at rest in process memory on every supported platform (including non-Windows, where `SecureString` does not), `mlock`s the buffers so the OS won't page them to disk, wipes on `Dispose`, survives [process-key rotation](#process-key-rotation-opt-in) without invalidating live instances, and ships a [build-time analyzer](#build-time-analyzer) that fails the build when plaintext escapes into a managed `string`. See [Security model](#security-model) for the full picture.
 
 #### 2. When ProtectedString is the wrong tool
 
@@ -1061,7 +1111,7 @@ What you do get by keeping the string narrow: the `ProtectedString` itself stays
 
 #### 12. My analyzer is firing TPS001 / TPS002. How do I tell what's wrong?
 
-The most common cause is `new string(plain)` or `plain.ToString()` inside an `Access` callback — the resulting `string` is on the heap, unwipeable, and visible to a heap dump. Replace it with a `Span<char>` sink (`CopyTo`, `WriteUtf8To`) or transform the data inside the callback. See [Build-time analyzer](#build-time-analyzer-tps001--tps002) for the full trigger list and unavoidable-boundary suppressions.
+The most common cause is `new string(plain)` or `plain.ToString()` inside an `Access` callback — the resulting `string` is on the heap, unwipeable, and visible to a heap dump. Replace it with a `Span<char>` sink (`CopyTo`, `WriteUtf8To`) or transform the data inside the callback. See [Build-time analyzer](#build-time-analyzer) for the full trigger list and unavoidable-boundary suppressions.
 
 #### 13. Why can't `ProtectedString` be injected where an API demands a `SecureString`?
 
@@ -1136,6 +1186,7 @@ References used while auditing this implementation. Everything beyond *"this enc
 TopSecret.ProtectedString/                       # main cross-platform library (NuGet)
 TopSecret.ProtectedString.Analyzers/             # Roslyn analyzer (TPS001 / TPS002), packed into the main NuGet
 TopSecret.ProtectedString.Configuration/         # optional appsettings.json binder subpackage (NuGet)
+TopSecret.ProtectedString.Json/                  # optional System.Text.Json converter subpackage (NuGet)
 TopSecret.ProtectedString.WindowsTpm/            # optional Windows TPM 2.0 subpackage (NuGet)
 TopSecret.ProtectedString.LinuxTpm/              # optional Linux TPM 2.0 subpackage (NuGet)
 TopSecret.ProtectedBlob/                         # large-secret-blob sibling package — chunked AEAD (NuGet)
@@ -1143,12 +1194,14 @@ TopSecret.ProtectedBlob.Tests/                   # NUnit tests: wire-format pinn
 TopSecret.ProtectedString.Tests/                 # NUnit 4 cross-platform tests + API-table drift guard
 TopSecret.ProtectedString.Analyzers.Tests/       # NUnit 4 analyzer detection-rule tests (hosts the analyzer in-memory)
 TopSecret.ProtectedString.Configuration.Tests/   # NUnit 4 configuration-binding tests
+TopSecret.ProtectedString.Json.Tests/            # NUnit 4 JSON-converter tests
 TopSecret.ProtectedString.WindowsTpm.Tests/      # NUnit 4 Windows-only smoke tests
 TopSecret.ProtectedString.LinuxTpm.Tests/        # NUnit 4 Linux-only smoke tests
 TopSecret.Demo.Core/                             # shared demo scenarios + DemoTests + the in-process NUnit runner (net10.0 library)
 TopSecret.Demo/                                  # runnable console demo host (the .slnLaunch sets this as the default startup project)
 TopSecret.Demo.Wasm/                             # browser demo host: Demo.Core in xterm.js on .NET WebAssembly, deployed to GitHub Pages per push (not in the .sln — needs wasm-tools)
-docs/nuget/                                      # the single shared NuGet README packed into all five packages
+benchmarks/TopSecret.ProtectedString.Benchmarks/ # BenchmarkDotNet key-at-rest tier micro-benchmarks (not in the .sln — manual dev tool)
+docs/nuget/                                      # the single shared NuGet README packed into all six packages
 TopSecret.ProtectedString.sln
 TopSecret.ProtectedString.slnLaunch              # committed VS launch profile pinning the Demo project
 Directory.Build.props                            # release-time PackageReleaseNotes injection (reads release_notes.txt when the file exists)

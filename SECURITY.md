@@ -35,9 +35,9 @@ vulnerability is prioritized over new feature work.
 ## Scope
 
 **In scope:** the packages in this repository (`TopSecret.ProtectedString`,
-`TopSecret.ProtectedBlob`, the TPM/Configuration satellites, and the Roslyn
-analyzer) and the GitHub Actions workflows that build, test, and release
-them.
+`TopSecret.ProtectedBlob`, the TPM/Configuration/Json satellites, and the
+Roslyn analyzer) and the GitHub Actions workflows that build, test, and
+release them.
 
 **Out of scope:** the demo apps (`TopSecret.Demo`, `TopSecret.Demo.Wasm`)
 except where a demo bug points at a real library issue, and anything already
