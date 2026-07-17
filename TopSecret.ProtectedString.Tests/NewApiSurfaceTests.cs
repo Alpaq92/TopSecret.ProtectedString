@@ -65,6 +65,61 @@ public class NewApiSurfaceTests
         Assert.Throws<InvalidOperationException>(() => ps.AppendChars("y".AsSpan()));
     }
 
+    // ---- AppendUtf8 / FromUtf8 --------------------------------------------
+
+    [Test]
+    public void FromUtf8_round_trips_non_ascii_bytes()
+    {
+        const string value = "naïve café ☕ пароль";
+        var utf8 = System.Text.Encoding.UTF8.GetBytes(value);
+
+        using var ps = ProtectedString.FromUtf8(utf8);
+
+        Assert.That(ps.IsReadOnly, Is.True);
+        ps.Access(plain => Assert.That(new string(plain), Is.EqualTo(value)));
+    }
+
+    [Test]
+    public void FromUtf8_empty_yields_empty_readonly_instance()
+    {
+        using var ps = ProtectedString.FromUtf8(ReadOnlySpan<byte>.Empty);
+        Assert.That(ps.Length, Is.EqualTo(0));
+        Assert.That(ps.IsReadOnly, Is.True);
+    }
+
+    [Test]
+    public void AppendUtf8_composes_with_char_appends()
+    {
+        using var ps = new ProtectedString();
+        ps.AppendChars("id=".AsSpan());
+        ps.AppendUtf8(System.Text.Encoding.UTF8.GetBytes("café"));
+        ps.AppendChar('!');
+        ps.MakeReadOnly();
+        ps.Access(plain => Assert.That(new string(plain), Is.EqualTo("id=café!")));
+    }
+
+    [Test]
+    public void AppendUtf8_read_only_throws_and_empty_is_a_no_op()
+    {
+        using var ps = new ProtectedString();
+        ps.AppendChars("x".AsSpan());
+        ps.AppendUtf8(ReadOnlySpan<byte>.Empty); // no-op, still writable
+        Assert.That(ps.Length, Is.EqualTo(1));
+
+        ps.MakeReadOnly();
+        Assert.Throws<InvalidOperationException>(
+            () => ps.AppendUtf8(System.Text.Encoding.UTF8.GetBytes("y")));
+    }
+
+    [Test]
+    public void FromUtf8_rejects_invalid_utf8_instead_of_silently_substituting()
+    {
+        // A lone continuation byte is not valid UTF-8; strict decoding must
+        // throw rather than corrupt the secret with a U+FFFD replacement.
+        Assert.Throws<System.Text.DecoderFallbackException>(
+            () => ProtectedString.FromUtf8(new byte[] { 0x80 }));
+    }
+
     // ---- Utf8Access --------------------------------------------------------
 
     [Test]

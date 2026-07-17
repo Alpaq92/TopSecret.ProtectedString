@@ -467,31 +467,25 @@ public class ProtectedStringTests
     // ---- Key-at-rest protection ---------------------------------------
 
     [Test]
-    public void KeyAtRestProtection_default_is_None()
+    public void KeyAtRestProtection_default_is_Obscurity()
     {
+        // Changed from None in 2.4 so the default posture wraps the master.
         Assert.That(ProtectedStringOptions.KeyAtRestProtection,
-            Is.EqualTo(KeyAtRestProtection.None));
+            Is.EqualTo(KeyAtRestProtection.Obscurity));
     }
 
     [Test]
-    public void KeyAtRestProtection_option_round_trips_all_four_values()
+    public void KeyAtRestProtection_option_round_trips_all_values()
     {
         // Property round-trip only — the actual protector chosen depends on
         // when the lazy initializer first runs, so this fixture cannot
-        // exercise the per-tier paths in-process. End-to-end coverage of
-        // Obscurity / HardwareBackedRequired / HardwareBackedPreferred
-        // requires either a fresh process per scenario or a test-only reset
-        // hook (not currently exposed).
+        // exercise the per-tier paths in-process. End-to-end coverage of the
+        // wrapping tiers lives in the factory-coverage and guarded-page
+        // fixtures, which drive KeyAtRestProtectorFactory.Create directly.
         var prior = ProtectedStringOptions.KeyAtRestProtection;
         try
         {
-            foreach (var value in new[]
-                     {
-                         KeyAtRestProtection.None,
-                         KeyAtRestProtection.Obscurity,
-                         KeyAtRestProtection.HardwareBackedRequired,
-                         KeyAtRestProtection.HardwareBackedPreferred,
-                     })
+            foreach (var value in Enum.GetValues<KeyAtRestProtection>())
             {
                 ProtectedStringOptions.KeyAtRestProtection = value;
                 Assert.That(ProtectedStringOptions.KeyAtRestProtection, Is.EqualTo(value),
