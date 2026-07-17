@@ -113,9 +113,9 @@ jobs:
       - name: Test
         run: dotnet test --configuration Release --no-build --verbosity normal
 
-      # Sln-wide pack emits the six IsPackable projects: main, WindowsTpm,
-      # LinuxTpm, Configuration, ProtectedBlob, Json. The analyzer DLL ships
-      # inside the main and ProtectedBlob packages at analyzers/dotnet/cs/.
+      # Sln-wide pack emits the seven IsPackable projects: main, WindowsTpm,
+      # LinuxTpm, Configuration, ProtectedBlob, Json, Xml. The analyzer DLL
+      # ships inside the main and ProtectedBlob packages at analyzers/dotnet/cs/.
       - name: Pack
         run: dotnet pack TopSecret.ProtectedString.sln --configuration Release --no-build -p:PackageVersion=${{ steps.tag.outputs.version }} -o ./nupkg
 
