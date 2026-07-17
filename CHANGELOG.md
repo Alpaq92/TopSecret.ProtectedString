@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.5.0](https://github.com/Alpaq92/TopSecret.ProtectedString/compare/v2.4.0...v2.5.0) (2026-07-17)
+
+
+### Features
+
+* **xml:** TopSecret.ProtectedString.Xml — read an XML element into a ProtectedString ([ea773e5](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/ea773e56762e51aea0f158ec1453fb697fec3118))
+
+
+### Documentation
+
+* XML binding section and seven-package references ([600aaeb](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/600aaeb66785019cb1b15a962da868f95ca63132))
+
 ## [2.4.0](https://github.com/Alpaq92/TopSecret.ProtectedString/compare/v2.3.1...v2.4.0) (2026-07-17)
 
 
