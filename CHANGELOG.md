@@ -1,5 +1,19 @@
 # Changelog
 
+## [2.4.0](https://github.com/Alpaq92/TopSecret.ProtectedString/compare/v2.3.1...v2.4.0) (2026-07-17)
+
+
+### Features
+
+* **api:** UTF-8 ingress (AppendUtf8/FromUtf8) and Argon2id calibrator ([4b6cbf0](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/4b6cbf0f83ecdb047249f675024c6475fddee505))
+* **json:** TopSecret.ProtectedString.Json — bind a JSON string into a ProtectedString ([9d20daa](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/9d20daad81151390a7316a00729bc45b61b7016b))
+* **security:** page-guarded key tier, fork hardening, working-set retry, and Obscurity-by-default ([0d2542c](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/0d2542c3261c26fabe8520b7babefdf67ef536d3))
+
+
+### Documentation
+
+* GuardedPage tier, JSON binding, UTF-8 ingress, calibrator, and TPS003 across the doc set ([e18d937](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/e18d937f5a78d4b0ec7a44637ab9c6ebaa12dda5))
+
 ## [2.3.1](https://github.com/Alpaq92/TopSecret.ProtectedString/compare/v2.3.0...v2.3.1) (2026-07-16)
 
 
