@@ -35,7 +35,7 @@ vulnerability is prioritized over new feature work.
 ## Scope
 
 **In scope:** the packages in this repository (`TopSecret.ProtectedString`,
-`TopSecret.ProtectedBlob`, the TPM/Configuration/Json satellites, and the
+`TopSecret.ProtectedBlob`, the TPM/Configuration/Json/Xml satellites, and the
 Roslyn analyzer) and the GitHub Actions workflows that build, test, and
 release them.
 

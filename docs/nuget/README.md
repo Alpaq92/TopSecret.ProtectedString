@@ -10,6 +10,7 @@ A small suite of .NET packages for keeping secrets safe **in memory**. It exists
 - **[TopSecret.ProtectedString.LinuxTpm](https://www.nuget.org/packages/TopSecret.ProtectedString.LinuxTpm)** — the same for Linux TPM 2.0 (`/dev/tpmrm0`).
 - **[TopSecret.ProtectedString.Configuration](https://www.nuget.org/packages/TopSecret.ProtectedString.Configuration)** — binds `appsettings.json` / `IConfiguration` values straight into `ProtectedString`, with no plaintext `string` detour.
 - **[TopSecret.ProtectedString.Json](https://www.nuget.org/packages/TopSecret.ProtectedString.Json)** — a `System.Text.Json` converter that binds a JSON string value straight into a `ProtectedString`, unescaping into locked scratch with no managed `string`. Deserialization-only by design.
+- **[TopSecret.ProtectedString.Xml](https://www.nuget.org/packages/TopSecret.ProtectedString.Xml)** — an `XmlReader` helper that reads an XML element's content straight into a `ProtectedString` with no managed `string`; hardened `FromXml` overloads parse XXE-safe. Deserialization-only by design.
 
 [Documentation & threat model](https://github.com/Alpaq92/TopSecret.ProtectedString#readme) · [Live browser demo](https://alpaq92.github.io/TopSecret.ProtectedString/) · [Changelog](https://github.com/Alpaq92/TopSecret.ProtectedString/blob/master/CHANGELOG.md) · MIT
 

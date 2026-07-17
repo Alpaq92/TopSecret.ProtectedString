@@ -75,6 +75,7 @@ Two front-line packages ship from this repo and cover the two ends of the spectr
   - [Hot-reload semantics](#hot-reload-semantics)
   - [Why static, not `IOptions<T>`?](#why-static-not-ioptionst)
 - [Binding a secret from JSON](#binding-a-secret-from-json)
+- [Binding a secret from XML](#binding-a-secret-from-xml)
 - [FAQ](#faq)
 - [Development](#development)
   - [Maintainer notes — version pins worth knowing](#maintainer-notes--version-pins-worth-knowing)
@@ -884,7 +885,7 @@ The `ci.yml` Linux leg additionally runs an AOT publish dry-run with warnings es
 
 ### Release & publishing flow
 
-`release.yml` produces six NuGet packages plus their `.snupkg` symbol packages:
+`release.yml` produces seven NuGet packages plus their `.snupkg` symbol packages:
 
 | Package | Contents |
 | --- | --- |
@@ -893,9 +894,10 @@ The `ci.yml` Linux leg additionally runs an AOT publish dry-run with warnings es
 | `TopSecret.ProtectedString.LinuxTpm` | Optional Linux TPM 2.0 wrapping subpackage. |
 | `TopSecret.ProtectedString.Configuration` | Optional `appsettings.json` binder — a single extension method (`BindProtectedStringOptions`) that wraps the `Enum.TryParse` / `TimeSpan.TryParse` boilerplate. Takes a single dependency on `Microsoft.Extensions.Configuration.Abstractions` so the main package stays dependency-minimal. |
 | `TopSecret.ProtectedString.Json` | Optional `System.Text.Json` converter (`ProtectedStringJsonConverter`) that binds a JSON string straight into a `ProtectedString` with no managed `string`. Deserialization-only; no extra dependency (`System.Text.Json` is in the shared framework). |
+| `TopSecret.ProtectedString.Xml` | Optional `XmlReader` helper (`ProtectedStringXml`) that reads an XML element's content straight into a `ProtectedString` with no managed `string`; hardened `FromXml` overloads parse XXE-safe. Deserialization-only; no extra dependency (`System.Xml` is in the shared framework). |
 | `TopSecret.ProtectedBlob` | Large-secret-blob sibling — chunked AES-GCM-256 envelope for multi-MB byte blobs, key wrapped under the shared process master (see [ProtectedBlob](#protectedblob-large-secret-blobs)). Bundles the same analyzer at `analyzers/dotnet/cs/`. |
 
-Two packaging details worth knowing: all six packages share **one NuGet `README.md`** ([`docs/nuget/README.md`](docs/nuget/README.md) — pure markdown sized for the nuget.org landing page, since nuget.org strips raw HTML), while this root README stays the GitHub-only landing page. Icons are per-package — `assets/string/`, `assets/blob/`, and `assets/rest/` (see [Icon](#icon)).
+Two packaging details worth knowing: all seven packages share **one NuGet `README.md`** ([`docs/nuget/README.md`](docs/nuget/README.md) — pure markdown sized for the nuget.org landing page, since nuget.org strips raw HTML), while this root README stays the GitHub-only landing page. Icons are per-package — `assets/string/`, `assets/blob/`, and `assets/rest/` (see [Icon](#icon)).
 
 Each release also redeploys the [live browser demo](https://alpaq92.github.io/TopSecret.ProtectedString/) via [`pages.yml`](.github/workflows/pages.yml).
 
@@ -1031,6 +1033,27 @@ var login = JsonSerializer.Deserialize<Login>(requestBody)!;
 Register it per-property with `[JsonConverter(typeof(ProtectedStringJsonConverter))]`, or add `new ProtectedStringJsonConverter()` to `JsonSerializerOptions.Converters` to cover every `ProtectedString` in a graph.
 
 **Deserialization-only by design.** The converter's `Write` throws `NotSupportedException`: serializing a `ProtectedString` back out would materialize the plaintext as a JSON string, exactly the exposure the library avoids (see [FAQ #3](#3-can-i-serialize-a-protectedstring)). Getting a secret *into* protection at the JSON boundary is the supported direction; getting one out is not.
+
+## Binding a secret from XML
+
+The optional [`TopSecret.ProtectedString.Xml`](https://www.nuget.org/packages/TopSecret.ProtectedString.Xml) package reads an XML element's text content straight into a `ProtectedString` via `XmlReader.ReadValueChunk` — the decoded value (entities and CDATA resolved) streams chunk-by-chunk into wiped scratch, never materializing as a managed `string`.
+
+Unlike `System.Text.Json`, `XmlSerializer` / `DataContractSerializer` have **no per-member converter hook**, so this is an explicit reader helper rather than an attribute you decorate a property with — call `ReadElementContent` from your own `XmlReader` loop or a type's `IXmlSerializable.ReadXml`, or use the hardened `FromXml` convenience when you just have the document:
+
+```csharp
+// Convenience — parses XXE-safe (DtdProcessing.Prohibit, XmlResolver = null)
+// and reads the first <Password> element. Stream overload is a true no-string ingress.
+using var password = ProtectedStringXml.FromXml(configStream, "Password");
+
+// Or drive your own reader (you own its XmlReaderSettings — make them XXE-safe):
+using var reader = XmlReader.Create(stream, mySettings);
+reader.ReadToFollowing("Token");
+using var token = ProtectedStringXml.ReadElementContent(reader);
+```
+
+> **XXE.** `ReadElementContent` reads from a reader *you* create, so *you* own its `XmlReaderSettings` — set `DtdProcessing.Prohibit` and `XmlResolver = null` for untrusted input. The `FromXml` overloads build the reader themselves with exactly those settings, so a `<!DOCTYPE …>` in the input is rejected rather than expanded.
+
+**Read-only by design**, same as the JSON companion: there is no write path, because serializing a `ProtectedString` back to XML would materialize the plaintext.
 
 ## FAQ
 
@@ -1187,6 +1210,7 @@ TopSecret.ProtectedString/                       # main cross-platform library (
 TopSecret.ProtectedString.Analyzers/             # Roslyn analyzer (TPS001 / TPS002), packed into the main NuGet
 TopSecret.ProtectedString.Configuration/         # optional appsettings.json binder subpackage (NuGet)
 TopSecret.ProtectedString.Json/                  # optional System.Text.Json converter subpackage (NuGet)
+TopSecret.ProtectedString.Xml/                   # optional XmlReader helper subpackage (NuGet)
 TopSecret.ProtectedString.WindowsTpm/            # optional Windows TPM 2.0 subpackage (NuGet)
 TopSecret.ProtectedString.LinuxTpm/              # optional Linux TPM 2.0 subpackage (NuGet)
 TopSecret.ProtectedBlob/                         # large-secret-blob sibling package — chunked AEAD (NuGet)
@@ -1195,13 +1219,14 @@ TopSecret.ProtectedString.Tests/                 # NUnit 4 cross-platform tests 
 TopSecret.ProtectedString.Analyzers.Tests/       # NUnit 4 analyzer detection-rule tests (hosts the analyzer in-memory)
 TopSecret.ProtectedString.Configuration.Tests/   # NUnit 4 configuration-binding tests
 TopSecret.ProtectedString.Json.Tests/            # NUnit 4 JSON-converter tests
+TopSecret.ProtectedString.Xml.Tests/             # NUnit 4 XML-helper tests
 TopSecret.ProtectedString.WindowsTpm.Tests/      # NUnit 4 Windows-only smoke tests
 TopSecret.ProtectedString.LinuxTpm.Tests/        # NUnit 4 Linux-only smoke tests
 TopSecret.Demo.Core/                             # shared demo scenarios + DemoTests + the in-process NUnit runner (net10.0 library)
 TopSecret.Demo/                                  # runnable console demo host (the .slnLaunch sets this as the default startup project)
 TopSecret.Demo.Wasm/                             # browser demo host: Demo.Core in xterm.js on .NET WebAssembly, deployed to GitHub Pages per push (not in the .sln — needs wasm-tools)
 benchmarks/TopSecret.ProtectedString.Benchmarks/ # BenchmarkDotNet key-at-rest tier micro-benchmarks (not in the .sln — manual dev tool)
-docs/nuget/                                      # the single shared NuGet README packed into all six packages
+docs/nuget/                                      # the single shared NuGet README packed into all seven packages
 TopSecret.ProtectedString.sln
 TopSecret.ProtectedString.slnLaunch              # committed VS launch profile pinning the Demo project
 Directory.Build.props                            # release-time PackageReleaseNotes injection (reads release_notes.txt when the file exists)
