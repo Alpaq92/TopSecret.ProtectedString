@@ -200,6 +200,9 @@ internal sealed class NoopKeyAtRestProtector : KeyAtRestProtector, IDisposable
 /// because silently downgrading a hard security request defeats the point.
 /// <see cref="KeyAtRestProtection.Obscurity"/> skips tier 1 and stops at
 /// tier 2 (which always succeeds via the HKDF fallback).
+/// <see cref="KeyAtRestProtection.GuardedPage"/> keeps the master on a
+/// no-access page (<see cref="PageGuardedKeyProtector"/>) and falls back to
+/// tier 2 where no page-protection primitive exists (browser-wasm).
 /// <see cref="KeyAtRestProtection.HardwareBackedPreferred"/> walks tier 1 →
 /// tier 2 → no-op silently.
 /// </para>
@@ -460,14 +463,26 @@ public static class KeyAtRestProtectorFactory
             // Preferred: fall through to obscurity tier silently.
         }
 
+        // Tier 1.5 — software page-guarding. Above obscurity (fault-on-scan
+        // vs. combine-two-buffers), below hardware. Falls back to obscurity
+        // where no page-protection primitive exists (browser-wasm).
+        if (mode == KeyAtRestProtection.GuardedPage)
+        {
+            var guarded = PageGuardedKeyProtector.TryCreate(master);
+            if (guarded is not null) return guarded;
+            // TryCreate returned null without consuming the master (no page
+            // protection on this platform) — degrade to obscurity.
+        }
+
         // Tier 2 — software obscurity.
         if (mode == KeyAtRestProtection.Obscurity ||
+            mode == KeyAtRestProtection.GuardedPage ||
             mode == KeyAtRestProtection.HardwareBackedPreferred)
         {
             var soft = TryCreateObscurity(master);
             if (soft is not null) return soft;
 
-            if (mode == KeyAtRestProtection.Obscurity)
+            if (mode == KeyAtRestProtection.Obscurity || mode == KeyAtRestProtection.GuardedPage)
             {
                 // The HKDF fallback inside TryCreateObscurity should have
                 // succeeded. If we got here, every cross-platform path

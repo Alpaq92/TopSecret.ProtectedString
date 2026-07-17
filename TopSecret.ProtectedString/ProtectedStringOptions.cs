@@ -152,6 +152,28 @@ public enum KeyAtRestProtection
     /// that don't have any. Per-op cost is whatever the active tier costs.
     /// </summary>
     HardwareBackedPreferred,
+
+    /// <summary>
+    /// Software page-guarding: the master key lives on its own dedicated OS
+    /// page mapping (<c>VirtualAlloc</c> / <c>mmap</c>, never a heap block)
+    /// marked no-access (Windows <c>PAGE_NOACCESS</c> / POSIX <c>PROT_NONE</c>)
+    /// except during the brief window of a key unwrap. A passive scan that
+    /// walks the process's mapped memory <b>faults</b> on the key page between
+    /// operations rather than reading the master — the strongest software-only
+    /// posture, sitting above <see cref="Obscurity"/> (which only forces a
+    /// scanner to combine two readable buffers) and below the hardware-backed
+    /// tiers.
+    /// <para>
+    /// Per-op cost is a page-protect syscall pair plus a 32-byte copy on every
+    /// master unwrap (comparable to <see cref="Obscurity"/>); amortise it with
+    /// <see cref="ProtectedStringOptions.UnwrappedKeyCacheTtl"/> on hot paths.
+    /// Falls back to <see cref="Obscurity"/> where page protection is
+    /// unavailable (browser-wasm) or the initial seal fails under a
+    /// non-<see cref="MemoryLockingFailureBehavior.Throw"/> policy — the
+    /// stronger fallback, never a silent drop to a readable page.
+    /// </para>
+    /// </summary>
+    GuardedPage,
 }
 
 /// <summary>
@@ -249,14 +271,29 @@ public static class ProtectedStringOptions
     private static TimeSpan s_processKeyRotationInterval = TimeSpan.FromHours(1);
 
     /// <summary>
-    /// Whether to wrap the per-process AES master key with a hardware-resident
-    /// wrapping key. Defaults to
-    /// <see cref="TopSecret.KeyAtRestProtection.None"/> — opt in by setting to
-    /// <see cref="TopSecret.KeyAtRestProtection.HardwareBackedRequired"/> or
-    /// <see cref="TopSecret.KeyAtRestProtection.HardwareBackedPreferred"/>
-    /// before the first <see cref="ProtectedString"/> is constructed.
+    /// How the per-process AES master key is wrapped at rest. Defaults to
+    /// <see cref="TopSecret.KeyAtRestProtection.Obscurity"/> — a software wrap
+    /// that always succeeds on every platform and forces a passive memory
+    /// scanner to find <i>and</i> combine two buffers instead of lifting one.
+    /// Set to <see cref="TopSecret.KeyAtRestProtection.None"/> for the
+    /// zero-overhead plaintext-master posture,
+    /// <see cref="TopSecret.KeyAtRestProtection.GuardedPage"/> to keep the
+    /// master on a page that faults when no operation is in flight, or
+    /// <see cref="TopSecret.KeyAtRestProtection.HardwareBackedRequired"/> /
+    /// <see cref="TopSecret.KeyAtRestProtection.HardwareBackedPreferred"/> for
+    /// secure-element wrapping — all set before the first
+    /// <see cref="ProtectedString"/> is constructed.
     /// </summary>
     /// <remarks>
+    /// <para>
+    /// <b>Default changed in 2.4.</b> Prior versions defaulted to
+    /// <see cref="TopSecret.KeyAtRestProtection.None"/> (plaintext master in
+    /// pinned/locked/dump-excluded memory). The new default costs one extra
+    /// HKDF derive (or, on Windows, one AES-GCM unwrap) per master unwrap,
+    /// amortizable to near-zero with <see cref="UnwrappedKeyCacheTtl"/>. Set
+    /// this back to <see cref="TopSecret.KeyAtRestProtection.None"/> explicitly
+    /// if you need the old zero-overhead behavior.
+    /// </para>
     /// <para>
     /// Built-in hardware-backed providers ship on Apple (Secure Enclave) and
     /// on the <c>net10.0-android</c> TFM (Android Keystore TEE). For Windows
@@ -299,7 +336,7 @@ public static class ProtectedStringOptions
             s_keyAtRestProtection = value;
         }
     }
-    private static KeyAtRestProtection s_keyAtRestProtection = KeyAtRestProtection.None;
+    private static KeyAtRestProtection s_keyAtRestProtection = KeyAtRestProtection.Obscurity;
 
     /// <summary>
     /// How long an unwrapped master key may be held in pinned, locked memory

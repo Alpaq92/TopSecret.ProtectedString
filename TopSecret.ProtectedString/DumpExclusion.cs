@@ -3,11 +3,21 @@ using System.Runtime.InteropServices;
 namespace TopSecret;
 
 /// <summary>
-/// Thin cross-platform wrapper around the OS crash-dump exclusion primitives:
-/// <c>WerRegisterExcludedMemoryBlock</c> / <c>WerUnregisterExcludedMemoryBlock</c>
-/// on Windows and <c>madvise(MADV_DONTDUMP)</c> / <c>madvise(MADV_DODUMP)</c> on
-/// Linux and Android. Excluded ranges are omitted from the dumps those
-/// facilities produce.
+/// Cross-platform wrapper around the OS primitives that harden a page range
+/// against leaking secrets into out-of-process artifacts:
+/// <list type="bullet">
+///   <item><b>Crash-dump exclusion</b> — <c>WerRegisterExcludedMemoryBlock</c> /
+///   <c>WerUnregisterExcludedMemoryBlock</c> on Windows,
+///   <c>madvise(MADV_DONTDUMP)</c> / <c>madvise(MADV_DODUMP)</c> on
+///   Linux/Android. Excluded ranges are omitted from the dumps those
+///   facilities produce (<see cref="TryExclude{T}"/> / <see cref="TryInclude{T}"/>
+///   and the <c>…Range</c> forms).</item>
+///   <item><b>Fork hardening</b> — <c>madvise(MADV_WIPEONFORK)</c> on
+///   Linux/Android (4.14+), so a forked child reads zeros in place of the
+///   secret (<see cref="TryWipeOnForkRange"/>).</item>
+/// </list>
+/// Both are best-effort <c>madvise</c>/WER advice on the same page-granular
+/// substrate, so they share this wrapper's page-rounding and probe scaffolding.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -48,9 +58,14 @@ internal static class DumpExclusion
 {
     private const int MADV_DONTDUMP = 16;
     private const int MADV_DODUMP = 17;
+    private const int MADV_WIPEONFORK = 18;
+    private const int MADV_KEEPONFORK = 19;
 
     private static readonly Lazy<bool> s_supported =
         new(Probe, LazyThreadSafetyMode.ExecutionAndPublication);
+
+    private static readonly Lazy<bool> s_wipeOnForkSupported =
+        new(ProbeWipeOnFork, LazyThreadSafetyMode.ExecutionAndPublication);
 
     /// <summary>
     /// Whether a dump-exclusion primitive is reachable on this platform.
@@ -78,11 +93,8 @@ internal static class DumpExclusion
     public static bool TryExclude<T>(T[] buffer) where T : unmanaged
     {
         if (buffer.Length == 0) return true;
-        if (!IsSupported) return true;
-        return TryAdvise(
-            Marshal.UnsafeAddrOfPinnedArrayElement(buffer, 0),
-            ByteSize(buffer),
-            exclude: true);
+        return TryExcludeRange(
+            Marshal.UnsafeAddrOfPinnedArrayElement(buffer, 0), checked((int)ByteSize(buffer)));
     }
 
     /// <summary>
@@ -104,12 +116,9 @@ internal static class DumpExclusion
     /// </remarks>
     public static void TryInclude<T>(T[] buffer) where T : unmanaged
     {
-        if (buffer.Length == 0 || !IsSupported) return;
-        if (!OperatingSystem.IsWindows()) return;
-        TryAdvise(
-            Marshal.UnsafeAddrOfPinnedArrayElement(buffer, 0),
-            ByteSize(buffer),
-            exclude: false);
+        if (buffer.Length == 0) return;
+        TryIncludeRange(
+            Marshal.UnsafeAddrOfPinnedArrayElement(buffer, 0), checked((int)ByteSize(buffer)));
     }
 
     /// <summary>
@@ -122,6 +131,61 @@ internal static class DumpExclusion
         if (size == 0) return true;
         if (!IsSupported) return true;
         return TryAdvise(addr, (nuint)size, exclude: true);
+    }
+
+    /// <summary>
+    /// Reverses a prior <see cref="TryExcludeRange"/> on Windows (returning the
+    /// WER budget entry); a deliberate no-op on libc targets, matching
+    /// <see cref="TryInclude{T}"/>. For range owners that free the underlying
+    /// memory immediately after.
+    /// </summary>
+    public static void TryIncludeRange(IntPtr addr, int size)
+    {
+        if (size == 0 || !IsSupported) return;
+        if (!OperatingSystem.IsWindows()) return;
+        TryAdvise(addr, (nuint)size, exclude: false);
+    }
+
+    /// <summary>
+    /// Whether <c>madvise(MADV_WIPEONFORK)</c> is available (Linux/Android,
+    /// kernel 4.14+). Probed once per process.
+    /// </summary>
+    public static bool IsWipeOnForkSupported => s_wipeOnForkSupported.Value;
+
+    /// <summary>
+    /// Marks a page-aligned, whole-page range so that after a <c>fork()</c> the
+    /// <b>child</b>'s copy of the range reads as zeros — a defence-in-depth
+    /// measure so secrets do not silently survive into a forked child (native
+    /// interop, <c>fork</c>-based tooling). Linux/Android only, best-effort and
+    /// silent: a pre-4.14 kernel or an unsupported host is a no-op, not a
+    /// policy failure.
+    /// </summary>
+    /// <remarks>
+    /// <b>Apply only to dedicated, secret-only, process-lifetime regions</b> —
+    /// the <see cref="LockedScratchPool"/> slabs and the guarded master page.
+    /// Because the advice is page-granular and persists on the mapping,
+    /// setting it on a recyclable managed (POH) buffer would zero whatever the
+    /// GC later places there in a forked child; the callers here own their
+    /// pages outright and never recycle them to non-secret use.
+    /// </remarks>
+    public static bool TryWipeOnForkRange(IntPtr addr, int size)
+    {
+        if (size == 0 || !IsWipeOnForkSupported) return true;
+        try { return Madvise(addr, (nuint)size, MADV_WIPEONFORK) == 0; }
+        catch { return false; }
+    }
+
+    private static bool ProbeWipeOnFork()
+    {
+        if (!OperatingSystem.IsLinux() && !OperatingSystem.IsAndroid()) return false;
+        return ProbePinned(Environment.SystemPageSize, static (addr, size) =>
+        {
+            if (Madvise(addr, size, MADV_WIPEONFORK) != 0) return false;
+            // Reset the probe page's advice so this transient POH page does not
+            // carry WIPEONFORK once it is recycled.
+            Madvise(addr, size, MADV_KEEPONFORK);
+            return true;
+        });
     }
 
     private static nuint ByteSize<T>(T[] buffer) where T : unmanaged =>
@@ -142,22 +206,33 @@ internal static class DumpExclusion
             return false;
         }
 
-        try
+        // TryAdvise owns the per-platform dispatch and the exception swallowing
+        // (DllNotFoundException / EntryPointNotFoundException on old hosts
+        // become false) — the probe just exercises a full round trip.
+        return ProbePinned(64, static (addr, size) =>
         {
-            var probe = GC.AllocateArray<byte>(64, pinned: true);
-            var addr = Marshal.UnsafeAddrOfPinnedArrayElement(probe, 0);
-            var size = (nuint)probe.Length;
-            // TryAdvise owns the per-platform dispatch and the exception
-            // swallowing (DllNotFoundException / EntryPointNotFoundException
-            // on old hosts become false) — the probe just exercises a full
-            // exclude/include round trip through it.
             if (!TryAdvise(addr, size, exclude: true)) return false;
             TryAdvise(addr, size, exclude: false);
             return true;
+        });
+    }
+
+    /// <summary>
+    /// Allocates a pinned probe buffer and runs <paramref name="roundTrip"/>
+    /// against it, funnelling any platform-resolution exception to
+    /// <see langword="false"/> so a probe can never crash the type initializer.
+    /// Shared by <see cref="Probe"/> and <see cref="ProbeWipeOnFork"/>.
+    /// </summary>
+    private static bool ProbePinned(int size, Func<IntPtr, nuint, bool> roundTrip)
+    {
+        try
+        {
+            var probe = GC.AllocateArray<byte>(size, pinned: true);
+            var addr = Marshal.UnsafeAddrOfPinnedArrayElement(probe, 0);
+            return roundTrip(addr, (nuint)probe.Length);
         }
         catch
         {
-            // Probing must never crash the type initializer.
             return false;
         }
     }

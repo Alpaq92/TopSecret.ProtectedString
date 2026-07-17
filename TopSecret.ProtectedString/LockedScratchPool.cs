@@ -124,30 +124,13 @@ internal static class LockedScratchPool
         int baseOffset = (int)((page - (addr0 % page)) % page);
         var alignedAddr = (IntPtr)(addr0 + baseOffset);
 
-        // Policy applies once per slab instead of once per buffer; Throw
-        // still fails at the first allocation that needed the guarantee.
-        // Field assignment happens after the policy calls so a Throw leaves
-        // no half-initialised slab behind.
-        if (!MemoryLocker.TryLockRange(alignedAddr, SlabBytes))
-        {
-            HardeningPolicy.OnFailure("memory locking");
-        }
-        if (!DumpExclusion.TryExcludeRange(alignedAddr, SlabBytes))
-        {
-            try
-            {
-                HardeningPolicy.OnFailure("core-dump exclusion");
-            }
-            catch
-            {
-                // Throw policy: release the just-taken lock before
-                // surfacing — otherwise every retried Rent would abandon a
-                // permanently locked slab, bleeding the process's
-                // RLIMIT_MEMLOCK / working-set budget.
-                MemoryLocker.TryUnlockRange(alignedAddr, SlabBytes);
-                throw;
-            }
-        }
+        // Lock resident, dump-exclude, and wipe-on-fork the whole slab once
+        // (vs. once per buffer). A slab is a dedicated, secret-only region we
+        // never recycle, so the range form's wipe-on-fork is safe here. Under
+        // a Throw policy the helper releases its lock before surfacing, so a
+        // retried Rent cannot abandon a permanently locked slab. Field
+        // assignment happens after, so a Throw leaves no half-slab behind.
+        HardeningPolicy.LockAndExcludeRange(alignedAddr, SlabBytes, "memory locking");
 
         s_currentSlab = raw;
         s_bump = baseOffset;

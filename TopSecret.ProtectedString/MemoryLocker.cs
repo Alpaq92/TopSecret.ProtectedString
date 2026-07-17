@@ -141,14 +141,53 @@ internal static class MemoryLocker
         if (size == 0) return true;
         try
         {
-            return OperatingSystem.IsWindows()
-                ? VirtualLock(addr, size)
-                : mlock(addr, size) == 0;
+            if (!OperatingSystem.IsWindows())
+            {
+                return mlock(addr, size) == 0;
+            }
+
+            if (VirtualLock(addr, size)) return true;
+
+            // ERROR_WORKING_SET_QUOTA (1453): the process is at its working-set
+            // minimum and VirtualLock cannot pin more pages. Raise the minimum
+            // by what we need and retry exactly once — a genuinely starved host
+            // then still fails and honours the configured policy.
+            if (Marshal.GetLastPInvokeError() != ERROR_WORKING_SET_QUOTA) return false;
+            return TryBumpWorkingSetAndRelock(addr, size);
         }
         catch
         {
             return false;
         }
+    }
+
+    private const int ERROR_WORKING_SET_QUOTA = 1453;
+
+    /// <summary>Serializes the process-wide working-set read-modify-write so concurrent bumps don't lose updates.</summary>
+    private static readonly object s_workingSetLock = new();
+
+    private static bool TryBumpWorkingSetAndRelock(IntPtr addr, nuint size)
+    {
+        // The working-set minimum is one shared process resource; serialize the
+        // get/set so simultaneous large locks don't race and clobber each
+        // other's bump. The retried VirtualLock runs outside the lock (it acts
+        // on this call's own range, and a peer's later bump only adds headroom).
+        lock (s_workingSetLock)
+        {
+            IntPtr process = GetCurrentProcess();
+            if (!GetProcessWorkingSetSize(process, out nuint min, out nuint max)) return false;
+
+            // Add the requested bytes plus one page of slack to the minimum; keep
+            // the maximum at least the new minimum.
+            nuint pageSlack = (nuint)Environment.SystemPageSize;
+            nuint bump = size + pageSlack;
+            nuint newMin = min + bump;
+            if (newMin < min) return false; // nuint overflow — refuse rather than wrap
+            nuint newMax = max >= newMin ? max : newMin;
+
+            if (!SetProcessWorkingSetSize(process, newMin, newMax)) return false;
+        }
+        return VirtualLock(addr, size);
     }
 
     private static bool TryUnlockNative(IntPtr addr, nuint size)
@@ -173,6 +212,17 @@ internal static class MemoryLocker
     [DllImport("kernel32", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool VirtualUnlock(IntPtr lpAddress, nuint dwSize);
+
+    [DllImport("kernel32")]
+    private static extern IntPtr GetCurrentProcess();
+
+    [DllImport("kernel32", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetProcessWorkingSetSize(IntPtr hProcess, out nuint lpMinimumWorkingSetSize, out nuint lpMaximumWorkingSetSize);
+
+    [DllImport("kernel32", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetProcessWorkingSetSize(IntPtr hProcess, nuint dwMinimumWorkingSetSize, nuint dwMaximumWorkingSetSize);
 
     [DllImport("libc", SetLastError = true)]
     private static extern int mlock(IntPtr addr, nuint len);

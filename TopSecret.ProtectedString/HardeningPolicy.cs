@@ -31,6 +31,36 @@ internal static class HardeningPolicy
     }
 
     /// <summary>
+    /// Range form of <see cref="LockAndExclude"/> for a <b>dedicated,
+    /// secret-only page range</b> the caller owns outright (a
+    /// <see cref="LockedScratchPool"/> slab, the guarded master page): locks it
+    /// resident, excludes it from crash dumps, and marks it wipe-on-fork.
+    /// Because wipe-on-fork persists on the mapping, this must never be called
+    /// on a recyclable buffer — hence the range-only, owned-region contract.
+    /// On a <see cref="MemoryLockingFailureBehavior.Throw"/> exclusion failure
+    /// the just-taken residency lock is released before the exception
+    /// propagates, so a retrying caller cannot leak a locked range.
+    /// </summary>
+    public static void LockAndExcludeRange(IntPtr addr, int size, string lockContext)
+    {
+        if (size == 0) return;
+        if (!MemoryLocker.TryLockRange(addr, size)) OnFailure(lockContext);
+        if (!DumpExclusion.TryExcludeRange(addr, size))
+        {
+            try
+            {
+                OnFailure("core-dump exclusion");
+            }
+            catch
+            {
+                MemoryLocker.TryUnlockRange(addr, size);
+                throw;
+            }
+        }
+        DumpExclusion.TryWipeOnForkRange(addr, size);
+    }
+
+    /// <summary>
     /// Applies <see cref="ProtectedStringOptions.MemoryLockingFailureBehavior"/>
     /// to a hardening primitive failure. <paramref name="primitive"/> is a
     /// short noun phrase describing what failed (e.g.,
