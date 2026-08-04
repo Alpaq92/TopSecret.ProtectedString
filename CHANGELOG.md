@@ -1,5 +1,26 @@
 # Changelog
 
+## [2.6.0](https://github.com/Alpaq92/TopSecret.ProtectedString/compare/v2.5.0...v2.6.0) (2026-08-04)
+
+
+### Features
+
+* Bump the nuget-minor-and-patch group with 5 updates ([e8cb4fd](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/e8cb4fd6c4481c252d598e6b07f4ff6978c00710))
+
+
+### Bug Fixes
+
+* **deps:** Bump actions/attest-build-provenance from 3.0.0 to 4.1.1 ([94c9558](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/94c955895685d061d0d9a2573edd78c615b7e520))
+* **deps:** Bump actions/checkout from 7.0.0 to 7.0.1 ([60e8d89](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/60e8d89d42536c45558cf22b6f57b176ec0fd5b9))
+* **deps:** Bump actions/setup-dotnet from 5.4.0 to 6.0.0 ([fd34f1f](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/fd34f1f2cef66311213a6b1aab63cde765bcb74c))
+* **deps:** Bump github/codeql-action init+analyze from 4.36.3 to 4.37.5 ([c461990](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/c461990646b20d3155d8996249d0ff173dfdd1d7))
+* **deps:** Bump github/codeql-action/init from 4.36.3 to 4.37.4 ([37febda](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/37febda92e8a32876cf94a73e20ac8377a97934d))
+
+
+### Documentation
+
+* correct analyzer-promotion, release trigger, and TPS003 references ([8e06c60](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/8e06c60fd8816bf42483ea1703a0762ab2cda3bd))
+
 ## [2.5.0](https://github.com/Alpaq92/TopSecret.ProtectedString/compare/v2.4.0...v2.5.0) (2026-07-17)
 
 
