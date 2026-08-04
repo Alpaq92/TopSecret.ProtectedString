@@ -1,5 +1,14 @@
 # Changelog
 
+## [2.5.1](https://github.com/Alpaq92/TopSecret.ProtectedString/compare/v2.5.0...v2.5.1) (2026-08-04)
+
+
+### Bug Fixes
+
+* **deps:** Bump actions/attest-build-provenance from 3.0.0 to 4.1.1 ([94c9558](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/94c955895685d061d0d9a2573edd78c615b7e520))
+* **deps:** Bump actions/checkout from 7.0.0 to 7.0.1 ([60e8d89](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/60e8d89d42536c45558cf22b6f57b176ec0fd5b9))
+* **deps:** Bump actions/setup-dotnet from 5.4.0 to 6.0.0 ([fd34f1f](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/fd34f1f2cef66311213a6b1aab63cde765bcb74c))
+
 ## [2.5.0](https://github.com/Alpaq92/TopSecret.ProtectedString/compare/v2.4.0...v2.5.0) (2026-07-17)
 
 
