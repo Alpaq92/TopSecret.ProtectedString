@@ -25,7 +25,7 @@ A solution-wide build attempts every TFM and needs all workloads; CI builds leaf
 | --- | --- |
 | `TopSecret.ProtectedString` | Core library (multi-TFM). |
 | `TopSecret.ProtectedBlob` | Large-blob sibling package (net10.0; consumes core internals via `InternalsVisibleTo`). |
-| `TopSecret.ProtectedString.Analyzers` | Roslyn analyzer (TPS001/TPS002), packed inside both library NuGets. |
+| `TopSecret.ProtectedString.Analyzers` | Roslyn analyzer (TPS001/TPS002/TPS003), packed inside both library NuGets. |
 | `TopSecret.ProtectedString.{WindowsTpm,LinuxTpm}` | Optional TPM 2.0 key-wrap providers. |
 | `TopSecret.ProtectedString.Configuration` | Optional `IConfiguration` binder. |
 | `*.Tests` | NUnit 4 suites, one per package. |
