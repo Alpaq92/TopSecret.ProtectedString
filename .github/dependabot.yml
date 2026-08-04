@@ -62,3 +62,15 @@ updates:
     labels:
       - "dependencies"
       - "github-actions"
+    groups:
+      codeql-action:
+        # `github/codeql-action/init` and `.../analyze` are two dependencies
+        # to dependabot but one unit to CodeQL: analyze rejects a config
+        # written by a different release ("Loaded a configuration file for
+        # version 4.37.4, but running version 4.36.3"). Ungrouped, dependabot
+        # opened one PR per sub-action (#25 init, #28 analyze) and *each* was
+        # red on its own while neither was wrong — bumping only one half is
+        # what breaks. Grouping puts both pins in a single PR so the pair
+        # moves together. Added 2026-08-04 after that exact split.
+        patterns:
+          - "github/codeql-action*"

@@ -44,8 +44,14 @@ jobs:
       - name: Setup .NET
         uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
 
+      # init and analyze are one unit: the config init writes is version-
+      # stamped, and analyze refuses to read a config from a different
+      # release ("Loaded a configuration file for version X, but running
+      # version Y"). Bump BOTH pins to the same SHA in the same commit —
+      # dependabot sees them as two dependencies, so .github/dependabot.yml
+      # groups them into a single PR to keep that invariant.
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@f205ea1c3313d32999d8d6a48b4f6530d4437b38 # v4
+        uses: github/codeql-action/init@d1ba80a13dd99fba24a470575428917156a28b43 # v4.37.5
         with:
           languages: csharp
 
@@ -55,5 +61,6 @@ jobs:
       - name: Build
         run: dotnet build TopSecret.ProtectedString.sln --configuration Release --no-restore
 
+      # Same SHA as the init pin above — see the note there.
       - name: Perform CodeQL analysis
-        uses: github/codeql-action/analyze@54f647b7e1bb85c95cddabcd46b0c578ec92bc1a # v4
+        uses: github/codeql-action/analyze@d1ba80a13dd99fba24a470575428917156a28b43 # v4.37.5
