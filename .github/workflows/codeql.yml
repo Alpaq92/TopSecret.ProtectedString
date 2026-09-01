@@ -51,7 +51,7 @@ jobs:
       # dependabot sees them as two dependencies, so .github/dependabot.yml
       # groups them into a single PR to keep that invariant.
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@d1ba80a13dd99fba24a470575428917156a28b43 # v4.37.5
+        uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
         with:
           languages: csharp
 
@@ -63,4 +63,4 @@ jobs:
 
       # Same SHA as the init pin above — see the note there.
       - name: Perform CodeQL analysis
-        uses: github/codeql-action/analyze@d1ba80a13dd99fba24a470575428917156a28b43 # v4.37.5
+        uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
