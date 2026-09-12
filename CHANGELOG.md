@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.7.0](https://github.com/Alpaq92/TopSecret.ProtectedString/compare/v2.6.1...v2.7.0) (2026-09-12)
+
+
+### Features
+
+* Bump the nuget-minor-and-patch group with 6 updates ([08985b2](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/08985b2a96986c69931025393694df87a630c84d))
+
 ## [2.6.1](https://github.com/Alpaq92/TopSecret.ProtectedString/compare/v2.6.0...v2.6.1) (2026-09-12)
 
 
