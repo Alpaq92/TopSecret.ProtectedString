@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.6.1](https://github.com/Alpaq92/TopSecret.ProtectedString/compare/v2.6.0...v2.6.1) (2026-09-12)
+
+
+### Bug Fixes
+
+* **deps:** Bump actions/attest-build-provenance from 4.1.1 to 4.2.2 ([5e91478](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/5e91478a1b9ae79ba9dfe50dc4eb3c5c6b709a2e))
+* **deps:** Bump the codeql-action group with 2 updates ([cab8c07](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/cab8c07ba868b8a2f9d7864b0a1a3af52ce7fb93))
+
 ## [2.6.0](https://github.com/Alpaq92/TopSecret.ProtectedString/compare/v2.5.0...v2.6.0) (2026-08-04)
 
 
