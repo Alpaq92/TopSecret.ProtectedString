@@ -1,5 +1,19 @@
 # Changelog
 
+## [2.7.0](https://github.com/Alpaq92/TopSecret.ProtectedString/compare/v2.6.1...v2.7.0) (2026-10-07)
+
+
+### Features
+
+* Bump NUnit from 4.6.1 to 5.0.0 ([1f09534](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/1f095348d6aac89be9c48add028e56e32d3e0c5c))
+* Bump the nuget-minor-and-patch group with 6 updates ([08985b2](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/08985b2a96986c69931025393694df87a630c84d))
+
+
+### Bug Fixes
+
+* **deps:** Bump actions/deploy-pages from 5.0.0 to 5.0.1 ([345ed82](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/345ed824c32345b38519eeec6ab645a2b7e66820))
+* **deps:** Bump the codeql-action group with 2 updates ([1feb679](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/1feb67947f7564179c5c113410f1885815eec98a))
+
 ## [2.6.1](https://github.com/Alpaq92/TopSecret.ProtectedString/compare/v2.6.0...v2.6.1) (2026-09-12)
 
 
