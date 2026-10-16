@@ -154,9 +154,28 @@ jobs:
           fi
 
       # --skip-duplicate makes re-runs safe after a partial push; .snupkg
-      # symbol packages are auto-detected and uploaded alongside.
+      # symbol packages are auto-detected and uploaded alongside. Each
+      # package is pushed on its own with a longer timeout and a few
+      # retries: nuget.org occasionally answers a PUT with a 500 after
+      # minutes (and still ingests the package), which with the default
+      # 300 s timeout killed the 2.7.0 publish half-way through.
       - name: Push to NuGet.org
-        run: dotnet nuget push "./nupkg/*.nupkg" --api-key ${{ secrets.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --skip-duplicate
+        shell: bash
+        run: |
+          set -euo pipefail
+          for pkg in ./nupkg/*.nupkg; do
+            for attempt in 1 2 3; do
+              if dotnet nuget push "$pkg" --api-key "${{ secrets.NUGET_API_KEY }}" --source https://api.nuget.org/v3/index.json --skip-duplicate --timeout 600; then
+                break
+              fi
+              if [ "$attempt" -eq 3 ]; then
+                echo "::error::Failed to push $pkg after 3 attempts" >&2
+                exit 1
+              fi
+              echo "Push of $pkg failed (attempt $attempt); retrying in 30 s…" >&2
+              sleep 30
+            done
+          done
 
       - name: Attach packages to the GitHub Release
         shell: bash
