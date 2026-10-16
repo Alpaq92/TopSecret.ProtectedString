@@ -165,7 +165,7 @@ jobs:
           set -euo pipefail
           for pkg in ./nupkg/*.nupkg; do
             for attempt in 1 2 3; do
-              if dotnet nuget push "$pkg" --api-key "${{ secrets.NUGET_API_KEY }}" --source https://api.nuget.org/v3/index.json --skip-duplicate --timeout 600; then
+              if dotnet nuget push "$pkg" --api-key "${{ secrets.NUGET_API_KEY }}" --source https://api.nuget.org/v3/index.json --skip-duplicate --timeout 900; then
                 break
               fi
               if [ "$attempt" -eq 3 ]; then
