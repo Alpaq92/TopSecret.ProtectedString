@@ -4,9 +4,6 @@ using TopSecret;
 
 namespace TopSecret.XmlTests;
 
-/// <summary>
-/// Content-length ceiling and truncation hardening for the XML reader.
-/// </summary>
 [TestFixture]
 public class ProtectedStringXmlLimitTests
 {
@@ -81,9 +78,6 @@ public class ProtectedStringXmlLimitTests
     [Test]
     public void Truncated_document_fails_closed_instead_of_returning_a_partial_value()
     {
-        // The conformant reader throws its own XmlException on the missing
-        // end tag; the point is that no ProtectedString with a partial
-        // value is ever handed back.
         using var reader = ReaderOn("<r><P>partial-secr", "P");
         Assert.Throws<XmlException>(() => ProtectedStringXml.ReadElementContent(reader));
     }
@@ -97,11 +91,6 @@ public class ProtectedStringXmlLimitTests
         Assert.That(ex!.Message, Does.Contain("before the element's end tag"));
     }
 
-    /// <summary>
-    /// Wraps a real reader but pretends the input ended right after the first
-    /// text node — the "custom reader that reports EOF instead of throwing"
-    /// shape the fail-closed check exists for.
-    /// </summary>
     private sealed class EofAfterFirstTextReader : XmlReader
     {
         private readonly XmlReader _inner;

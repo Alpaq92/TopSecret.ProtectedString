@@ -3,12 +3,6 @@ using TopSecret;
 
 namespace TopSecret.ProtectedBlobTests;
 
-/// <summary>
-/// <c>CopyTo(long offset, Span&lt;byte&gt;)</c>: windowed reads that let a
-/// blob larger than a single <see cref="Span{T}"/> can address be consumed
-/// piecewise, with the same fail-closed and zero-on-failure contract as the
-/// whole-blob overload.
-/// </summary>
 [TestFixture]
 public class RangedCopyToTests
 {
@@ -111,9 +105,6 @@ public class RangedCopyToTests
         blob.FramesForTests[0][0] ^= 0x01;
         blob.FramesForTests[1][0] ^= 0x01;
 
-        // Nothing overlaps an empty window, so nothing is authenticated and
-        // nothing can fail — the whole-blob overload (which must read every
-        // chunk) is the one that detects this tampering.
         Assert.DoesNotThrow(() => blob.CopyTo(SmallChunk, Span<byte>.Empty));
         Assert.Catch<CryptographicException>(() => blob.CopyTo(new byte[blob.Length]));
     }

@@ -9,10 +9,6 @@ public class DumpExclusionTests
     [Test]
     public void IsSupported_matches_platform_capability()
     {
-        // Windows 10+ (WerRegisterExcludedMemoryBlock) and Linux (madvise
-        // MADV_DONTDUMP, kernel 3.4+) — both of which cover every CI leg that
-        // runs this TFM — must report support. Other platforms report false
-        // and the primitives degrade to no-ops.
         if (OperatingSystem.IsWindows() || OperatingSystem.IsLinux())
         {
             Assert.That(DumpExclusion.IsSupported, Is.True);
@@ -26,9 +22,6 @@ public class DumpExclusionTests
     [Test]
     public void WipeOnFork_support_matches_platform_and_range_calls_are_safe()
     {
-        // MADV_WIPEONFORK is Linux/Android (4.14+) only; every other host —
-        // including Windows, where the CI leg for this TFM runs — reports
-        // unsupported and the range call is a no-op that still returns true.
         if (OperatingSystem.IsWindows() || OperatingSystem.IsMacOS() ||
             OperatingSystem.IsIOS() || OperatingSystem.IsMacCatalyst())
         {
@@ -52,9 +45,6 @@ public class DumpExclusionTests
     {
         var buffer = GC.AllocateArray<byte>(64, pinned: true);
 
-        // True on supported platforms (the primitive succeeded) AND on
-        // not-applicable ones (the caller cannot act on a capability the OS
-        // does not offer, so absence is not reported as failure).
         Assert.That(DumpExclusion.TryExclude(buffer), Is.True);
         Assert.DoesNotThrow(() => DumpExclusion.TryInclude(buffer));
     }
@@ -70,10 +60,6 @@ public class DumpExclusionTests
     [Test]
     public void Sensitive_allocation_and_wipe_survive_the_dump_exclusion_path()
     {
-        // End-to-end through the real choke points: AllocatePinnedBytes with
-        // excludeFromDumps wires TryExclude; ZeroBytes → TryUnlock wires the
-        // automatic TryInclude. Default policy is LogWarning, so any platform
-        // shortfall degrades to a trace warning rather than a throw.
         var sensitive = ProtectedString.AllocatePinnedBytes(128, excludeFromDumps: true);
         Assert.That(sensitive.Length, Is.EqualTo(128));
         Assert.DoesNotThrow(() => ProtectedString.ZeroBytes(sensitive));

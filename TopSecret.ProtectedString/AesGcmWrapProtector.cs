@@ -3,46 +3,6 @@ using System.Text;
 
 namespace TopSecret;
 
-/// <summary>
-/// Universal software-obscurity wrap: AES-GCM-256 under a fresh
-/// per-protector random wrap key. The wrap key and the
-/// nonce/ciphertext/tag envelope live in two separately allocated, pinned,
-/// locked, dump-excluded buffers; <see cref="KeyAtRestProtector.UnwrapKey"/>
-/// AES-GCM-decrypts into a third freshly-allocated pinned/locked buffer that
-/// is wiped and unlocked when the returned <see cref="KeyAccessor"/> is
-/// disposed.
-/// </summary>
-/// <remarks>
-/// <para>
-/// <b>Platform reach.</b> Nothing here is OS-specific: AES-GCM comes from
-/// <see cref="AesGcmShim"/>, which uses the in-box
-/// <see cref="AesGcm"/> everywhere it is supported and BouncyCastle on
-/// <c>net10.0-browser</c>. The factory therefore selects this protector
-/// for the <see cref="KeyAtRestProtection.Obscurity"/> tier on every
-/// platform, with <see cref="HkdfWrapProtector"/> as the fallback only if
-/// AES-GCM construction declines.
-/// </para>
-/// <para>
-/// <b>Why this beats DPAPI's <c>CryptProtectMemory(SAME_PROCESS)</c>.</b>
-/// DPAPI derives its unwrap key from session state that a public PoC
-/// reproduces from a passive dump alone. The ephemeral-key scheme has
-/// no fixed system-wide key — the wrap key is 32 bytes of
-/// <see cref="RandomNumberGenerator"/> output, unique to this protector
-/// instance, and an attacker has to read both the wrap key buffer and
-/// the envelope buffer from the live process to reverse the wrap.
-/// </para>
-/// <para>
-/// <b>Why this isn't immune to a determined dump.</b> Both buffers still
-/// live in this process's address space. A heap-dump-capable attacker
-/// who knows the layout walks the pinned object heap, finds both, and
-/// reverses the AEAD. The win is "no fixed reproducible key", not
-/// "memory-dump-proof"; for the latter, opt into the hardware-backed
-/// tier (Apple SEP / Android Keystore / TPM 2.0 via the optional
-/// <c>TopSecret.ProtectedString.WindowsTpm</c> /
-/// <c>TopSecret.ProtectedString.LinuxTpm</c> NuGets) where the wrap key
-/// lives in a secure element instead of process memory.
-/// </para>
-/// </remarks>
 internal sealed class AesGcmWrapProtector : DisposableKeyAtRestProtector
 {
     private const int WrapKeySize = 32;
@@ -106,11 +66,6 @@ internal sealed class AesGcmWrapProtector : DisposableKeyAtRestProtector
         var ciphertext = _envelope.AsSpan(NonceSize, MasterKeySize);
         var tag = _envelope.AsSpan(NonceSize + MasterKeySize, TagSize);
 
-        // Decrypt onto the stack, promote into the locked ephemeral, wipe
-        // the stack copy. The stack residue lives for a few instructions
-        // and is overwritten by the next frame — the same transient window
-        // the HKDF stream and the AES implementation's own temporaries
-        // already occupy.
         Span<byte> plaintext = stackalloc byte[MasterKeySize];
         try
         {

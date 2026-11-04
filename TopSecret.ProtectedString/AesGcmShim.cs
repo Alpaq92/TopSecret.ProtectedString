@@ -8,80 +8,10 @@ using Org.BouncyCastle.Crypto.Parameters;
 
 namespace TopSecret;
 
-/// <summary>
-/// Cross-platform AES-GCM-256 wrapper. Delegates to
-/// <see cref="System.Security.Cryptography.AesGcm"/> on every TFM where it
-/// works at runtime, and to BouncyCastle's <c>GcmBlockCipher</c> on the
-/// <c>net10.0-browser</c> TFM where <see cref="AesGcm.IsSupported"/> is
-/// <see langword="false"/> and constructing <see cref="AesGcm"/> throws
-/// <see cref="PlatformNotSupportedException"/>.
-/// </summary>
-/// <remarks>
-/// <para>
-/// The two implementations agree on the AES-GCM-256 wire format — same
-/// 12-byte nonce, same 16-byte tag, same AAD binding — so ciphertext
-/// produced on one platform decrypts cleanly on another. (Not that this
-/// library serialises ciphertext across processes, but the equivalence
-/// guarantees the build and verify paths agree on what a "valid"
-/// ciphertext looks like.)
-/// </para>
-/// <para>
-/// On the BouncyCastle path, key / nonce / AAD / plaintext / ciphertext
-/// are copied into <see cref="byte"/>[] arrays allocated on the pinned
-/// object heap (<see cref="GC.AllocateArray{T}(int, bool)"/> with
-/// <c>pinned: true</c>) so the GC cannot relocate (and therefore copy)
-/// them between the BC operation and our wipe. Each of those buffers is
-/// zeroed with
-/// <see cref="CryptographicOperations.ZeroMemory(System.Span{byte})"/>
-/// in a <c>finally</c> block on the way out.
-/// </para>
-/// <para>
-/// <b>Residual: BouncyCastle holds non-zeroable copies.</b> Confirmed against
-/// BC's own source, not just inferred: <c>KeyParameter</c>'s constructor
-/// <i>copies</i> the key bytes (<c>Arrays.CopyBuffer</c>) rather than holding
-/// our array by reference, so it is already an independent copy the instant
-/// it's constructed — not something that becomes stale only once we zero our
-/// buffer. <c>AesEngine</c> separately derives the expanded AES round-key
-/// schedule into its own <c>WorkingKey</c> field, and <c>GcmBlockCipher</c>
-/// derives the GHASH subkey <c>H</c> (and a precomputed multiplication table)
-/// into its own fields. None of these three copies is reachable or wipeable
-/// through any public BC API — there is no <c>Dispose</c>/wipe method on any
-/// of these types. We zero our own buffers and, immediately after,
-/// null every local reference to the BC objects and force a Gen0 GC
-/// (<see cref="GC.Collect(int, GCCollectionMode, bool)"/>) so they — and the
-/// three copies above — become unreachable and eligible for reclaim as soon
-/// as possible, rather than whenever the runtime next happens to collect on
-/// its own (which, for an app that constructs one <see cref="ProtectedString"/>
-/// and calls <see cref="ProtectedString.Access(Action{char[]})"/> once, could
-/// be "never" before the tab closes). This shrinks the window during which
-/// the key schedule and GHASH subkey are reachable from a live object graph
-/// and encourages the CLR to reuse that memory soon — it does
-/// <i>not</i> zero the underlying bytes (the CLR does not clear reclaimed
-/// memory on collection), so a raw memory scan could still recover them
-/// until the space is overwritten by a later allocation. The Gen0-only,
-/// blocking collection trades real per-call CPU cost for that narrower
-/// window; memory locking (<c>mlock</c>) is not reachable from inside the
-/// WASM sandbox at all, so this is the only lever available here. The
-/// threat model on browser-wasm is "secrets do not escape the WebAssembly
-/// module"; the WASM linear memory is not paged to disk and is sandboxed
-/// away from other origins, so the residue does not leak across that
-/// boundary. If your threat model is stricter, do not rely on the
-/// browser-wasm TFM.
-/// </para>
-/// </remarks>
 internal static class AesGcmShim
 {
-    /// <summary>The AES-GCM tag size, in bytes (128 bits).</summary>
     public const int TagSize = 16;
 
-    /// <summary>
-    /// AEAD-encrypts <paramref name="plaintext"/> under
-    /// <paramref name="key"/> with the supplied <paramref name="nonce"/>
-    /// and <paramref name="associatedData"/>, writing the ciphertext into
-    /// <paramref name="ciphertext"/> (must be the same length as
-    /// <paramref name="plaintext"/>) and the authentication tag into
-    /// <paramref name="tag"/> (must be exactly <see cref="TagSize"/> bytes).
-    /// </summary>
     public static void Encrypt(
         ReadOnlySpan<byte> key,
         ReadOnlySpan<byte> nonce,
@@ -98,13 +28,6 @@ internal static class AesGcmShim
 #endif
     }
 
-    /// <summary>
-    /// AEAD-decrypts <paramref name="ciphertext"/> under
-    /// <paramref name="key"/> with the supplied <paramref name="nonce"/>,
-    /// <paramref name="tag"/>, and <paramref name="associatedData"/>. Throws
-    /// <see cref="CryptographicException"/> if the tag does not validate —
-    /// e.g., on cross-instance ciphertext swap or memory corruption.
-    /// </summary>
     public static void Decrypt(
         ReadOnlySpan<byte> key,
         ReadOnlySpan<byte> nonce,

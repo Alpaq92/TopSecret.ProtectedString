@@ -3,11 +3,6 @@ using TopSecret;
 
 namespace TopSecret.ProtectedBlobTests;
 
-/// <summary>
-/// The fail-closed matrix: every way an attacker (or memory corruption) can
-/// mutate the encrypted state must surface as <see cref="CryptographicException"/>,
-/// never as wrong plaintext.
-/// </summary>
 [TestFixture]
 public class TamperTests
 {
@@ -78,10 +73,6 @@ public class TamperTests
     [Test]
     public void Truncation_Dropping_The_Final_Chunk_Fails_The_Tag()
     {
-        // Format-level statement of the secretstream truncation defence: a
-        // chunk encrypted as non-final never authenticates as final, so a
-        // reader that expects its last chunk to carry the final flag detects
-        // any shortened frame sequence.
         byte[] dek = RandomNumberGenerator.GetBytes(32);
         byte[] prefix = RandomNumberGenerator.GetBytes(8);
         byte[] plaintext = RandomNumberGenerator.GetBytes(100);

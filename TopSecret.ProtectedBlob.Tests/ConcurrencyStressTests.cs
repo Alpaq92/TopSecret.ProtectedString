@@ -2,13 +2,6 @@ using TopSecret;
 
 namespace TopSecret.ProtectedBlobTests;
 
-/// <summary>
-/// Drives concurrent chunk reads against a shared blob while the process key
-/// rotates underneath, asserting every read round-trips. Blobs snapshot the
-/// protector at construction and are never migrated, so a rotation must not
-/// disturb an in-flight DEK unwrap (which rents pooled scratch under the blob's
-/// own lock).
-/// </summary>
 [TestFixture]
 [NonParallelizable]
 public class ConcurrencyStressTests

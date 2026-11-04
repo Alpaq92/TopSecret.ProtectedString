@@ -5,12 +5,6 @@ using TopSecret;
 
 namespace TopSecret.ProtectedStringTests;
 
-/// <summary>
-/// Behavioural tests for the members added alongside the locked-scratch
-/// pool: <c>AppendChars</c>, <c>Utf8Access</c>,
-/// <c>WriteUtf8To(IBufferWriter&lt;byte&gt;)</c>, and
-/// <c>SecureStringInterop.ToSecureString</c>.
-/// </summary>
 [TestFixture]
 public class NewApiSurfaceTests
 {
@@ -44,9 +38,6 @@ public class NewApiSurfaceTests
         using var ps = new ProtectedString();
         ps.AppendChars("0123456789abcdef".AsSpan()); // exactly fills the initial 16-char capacity
 
-        // Reentrant self-append: the handler's span aliases the live build
-        // buffer, and the append forces growth, which wipes that buffer —
-        // the staged-copy path must preserve the source.
         ps.Access(plain => ps.AppendChars(plain));
 
         Assert.That(ps.Length, Is.EqualTo(32));

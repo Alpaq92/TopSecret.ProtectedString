@@ -3,21 +3,6 @@ using TopSecret;
 
 namespace TopSecret.ProtectedStringTests;
 
-/// <summary>
-/// Hammers the locked-scratch pool, the <c>ProtectorLifetime</c> refcount, and
-/// the rotation-vs-construct ordering under concurrent load, asserting the two
-/// invariants they rest on continuously: <b>round-trip integrity</b> (every
-/// instance's <c>Access</c> returns exactly what it was constructed with, even
-/// across rotations) and <b>no chunk aliasing</b> (a freshly rented pool chunk
-/// always arrives zeroed — a non-zero byte means two live leases overlapped).
-/// </summary>
-/// <remarks>
-/// Seeded RNG (per test parameter) so any failure reproduces. This fixture is
-/// <see cref="NonParallelizableAttribute"/> versus other fixtures because it
-/// drives process-global rotation state, but spins its own worker threads.
-/// The correctness of the machinery here was previously established only by
-/// interleaving argument and code review; this turns that into execution.
-/// </remarks>
 [TestFixture]
 [NonParallelizable]
 public class ConcurrencyStressTests
@@ -41,13 +26,6 @@ public class ConcurrencyStressTests
         var failures = new System.Collections.Concurrent.ConcurrentQueue<string>();
         using var start = new ManualResetEventSlim(false);
 
-        // Diagnostics for the one-in-thousands failure this test has shown on
-        // macOS arm64 CI (an AuthenticationTagMismatchException on a freshly
-        // constructed instance, run 41813279078). When it recurs, the failure
-        // message must say which protector implementation was active, how
-        // many rotations had completed, and exactly which construction shape
-        // / operation / secret length the failing iteration used — the
-        // seeded RNG makes the latter reproducible, but only if recorded.
         string protectorType = TestAccessors.GetProcessKeyProtector()?.GetType().Name ?? "(not initialised yet)";
         int rotations = 0;
 
@@ -158,9 +136,6 @@ public class ConcurrencyStressTests
     [Test]
     public void Pool_hands_out_disjoint_zeroed_chunks_under_saturating_concurrency()
     {
-        // Directly stresses the no-aliasing invariant across every size class
-        // at once, so a race in bump-allocation vs free-list reuse surfaces as
-        // a chunk arriving non-zeroed (an overlap with another live lease).
         const int workers = 24;
         const int perWorker = 2000;
         var failures = new System.Collections.Concurrent.ConcurrentQueue<string>();

@@ -5,11 +5,6 @@ using TopSecret;
 
 namespace TopSecret.ConfigurationTests;
 
-/// <summary>
-/// Captures every <c>Write</c> / <c>WriteLine</c> the trace pipeline
-/// pushes at this listener so a test can assert on the formatted
-/// message content.
-/// </summary>
 internal sealed class CapturingTraceListener : TraceListener
 {
     public List<string> Messages { get; } = new();
@@ -25,14 +20,6 @@ internal sealed class CapturingTraceListener : TraceListener
     }
 }
 
-/// <summary>
-/// Tests <see cref="ProtectedStringConfigurationExtensions.BindProtectedStringOptions(IConfiguration)"/>
-/// (and its <see cref="IConfigurationSection"/> overload) against an
-/// in-memory <see cref="IConfiguration"/> built from key/value pairs.
-/// Each test snapshots and restores the relevant
-/// <see cref="ProtectedStringOptions"/> property so the suite can run
-/// in any order without polluting subsequent runs.
-/// </summary>
 [TestFixture]
 public class ProtectedStringConfigurationExtensionsTests
 {
@@ -162,14 +149,6 @@ public class ProtectedStringConfigurationExtensionsTests
         }
     }
 
-    // ---- Skip-on-malformed semantics ------------------------------------
-    // For each "value present but malformed" case, assert (a) the
-    // property keeps its prior value AND (b) a Trace.TraceWarning is
-    // emitted naming the bad key — the warning is the only signal that
-    // an `appsettings.json` typo was silently dropped, and verifying
-    // it fires here pins the diagnostic so a future "let's just delete
-    // the warning" refactor is caught.
-
     [Test]
     [NonParallelizable] // mutates Trace.Listeners
     public void Malformed_enum_value_warns_and_leaves_existing_value_unchanged()
@@ -243,9 +222,6 @@ public class ProtectedStringConfigurationExtensionsTests
     [NonParallelizable]
     public void Negative_TimeSpan_for_UnwrappedKeyCacheTtl_warns_and_does_not_throw()
     {
-        // The property setter throws on negative values; the binder
-        // pre-filters so a misconfiguration warns rather than crashing
-        // the host on startup.
         var prior = ProtectedStringOptions.UnwrappedKeyCacheTtl;
         var listener = new CapturingTraceListener();
         Trace.Listeners.Add(listener);
@@ -279,9 +255,6 @@ public class ProtectedStringConfigurationExtensionsTests
     [NonParallelizable]
     public void Missing_keys_do_not_trigger_warnings()
     {
-        // Skip-on-missing is silent — only skip-on-malformed warns.
-        // Partial configuration (only some keys set) is the common
-        // case, not an error.
         var listener = new CapturingTraceListener();
         Trace.Listeners.Add(listener);
         try
@@ -370,15 +343,6 @@ public class ProtectedStringConfigurationExtensionsTests
         }
     }
 
-    // ---- Undefined enum values ------------------------------------------
-    // Enum.TryParse accepts integer strings ("42") and comma-separated
-    // member lists ("A,B" → bitwise OR) for any enum, flags or not. None
-    // of the ProtectedStringOptions enums are [Flags], so such input
-    // yields a value no switch in the core library handles. The binder
-    // must reject it via Enum.IsDefined *before* the setter runs, so the
-    // warn-and-skip contract holds regardless of whether the setter
-    // itself validates.
-
     [Test]
     [NonParallelizable]
     public void Integer_string_enum_value_warns_and_leaves_existing_value_unchanged()
@@ -454,9 +418,6 @@ public class ProtectedStringConfigurationExtensionsTests
     [NonParallelizable]
     public void Wrong_casing_enum_value_still_binds_after_IsDefined_check()
     {
-        // ignoreCase must survive the IsDefined tightening: TryParse
-        // normalises the casing to the declared member, so IsDefined
-        // sees a defined value.
         var prior = ProtectedStringOptions.KeyAtRestProtection;
         var listener = new CapturingTraceListener();
         Trace.Listeners.Add(listener);
@@ -509,15 +470,6 @@ public class ProtectedStringConfigurationExtensionsTests
         }
     }
 
-    // ---- Section overload via extension syntax --------------------------
-    // IConfigurationSection : IConfiguration, so if only the
-    // IConfiguration overload were an extension method,
-    // cfg.GetSection("Crypto:Options").BindProtectedStringOptions()
-    // would resolve to it and read
-    // "Crypto:Options:TopSecret:ProtectedString" — the wrong path —
-    // silently binding nothing. Both overloads being extensions lets
-    // overload resolution pick the more specific section one.
-
     [Test]
     public void Section_overload_binds_when_called_via_extension_syntax()
     {
@@ -563,13 +515,6 @@ public class ProtectedStringConfigurationExtensionsTests
             ProtectedStringOptions.ProcessKeyRotationPolicy = prior;
         }
     }
-
-    // ---- Culture-invariant TimeSpan parsing -----------------------------
-    // ConfigurationBinder parses with CultureInfo.InvariantCulture so an
-    // appsettings.json binds identically on every host. On .NET Core the
-    // culture-sensitive TimeSpan.TryParse(string, out) additionally
-    // accepts the *localised* form (fr-FR: "00:00:00,250"), which the
-    // invariant overload rejects. Both directions are pinned here.
 
     [Test]
     [NonParallelizable] // mutates CultureInfo.CurrentCulture and Trace.Listeners
@@ -627,10 +572,6 @@ public class ProtectedStringConfigurationExtensionsTests
 
             ProtectedStringOptions.UnwrappedKeyCacheTtl = TimeSpan.FromMilliseconds(100);
 
-            // Under fr-FR, culture-sensitive TryParse would accept this.
-            // The binder is invariant, so it must warn-and-skip instead —
-            // otherwise the same appsettings.json would bind differently
-            // depending on the host's locale.
             var cfg = BuildConfiguration(
                 ("TopSecret:ProtectedString:UnwrappedKeyCacheTtl", "00:00:00,250"));
             cfg.BindProtectedStringOptions();
@@ -656,12 +597,6 @@ public class ProtectedStringConfigurationExtensionsTests
             CultureInfo.CurrentUICulture = priorUiCulture;
         }
     }
-
-    // ---- ProcessKeyRotationInterval must be positive --------------------
-    // The core periodic-rotation timer never starts when the interval is
-    // <= TimeSpan.Zero (EnsurePeriodicRotationTimer returns early with no
-    // diagnostic). Binding such a value from configuration would therefore
-    // silently disable rotation; the binder warns and skips instead.
 
     [Test]
     [NonParallelizable]
@@ -736,9 +671,6 @@ public class ProtectedStringConfigurationExtensionsTests
     [NonParallelizable]
     public void Zero_UnwrappedKeyCacheTtl_still_binds_because_zero_means_off()
     {
-        // Contrast with ProcessKeyRotationInterval: for the cache TTL,
-        // TimeSpan.Zero is the documented "cache disabled" value and must
-        // remain bindable without a warning.
         var prior = ProtectedStringOptions.UnwrappedKeyCacheTtl;
         var listener = new CapturingTraceListener();
         Trace.Listeners.Add(listener);

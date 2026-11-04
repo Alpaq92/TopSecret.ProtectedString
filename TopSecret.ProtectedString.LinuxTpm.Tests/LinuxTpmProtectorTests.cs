@@ -7,31 +7,10 @@ using Tpm2Lib;
 
 namespace TopSecret.LinuxTpm.Tests;
 
-/// <summary>
-/// Smoke tests for the Linux TPM protector. Mirror the
-/// <c>WindowsTpmProtectorTests</c> shape: a round-trip test against the
-/// real device, a no-TPM null-return test, and a wrong-size-master
-/// rejection. Each test self-skips when the runtime is not Linux or no
-/// TPM device is available, so the suite can run on Windows / macOS / on
-/// Linux CI legs without a TPM without any conditional gating in the
-/// workflow files.
-///
-/// Plus a fourth test that exercises the protector against a software
-/// TPM 2.0 simulator (<c>swtpm</c>) over <see cref="TcpTpmDevice"/>. CI
-/// installs and starts swtpm on the ubuntu-latest leg before running
-/// these tests, so this is the path that actually validates the
-/// TSS.MSR call shape on every PR.
-/// </summary>
 [TestFixture]
 [Platform(Include = "Linux")]
 public class LinuxTpmProtectorTests
 {
-    // swtpm launched with `--server type=tcp,port=2321 --ctrl
-    // type=tcp,port=2322` (see ci.yml). The command port carries RAW TPM2
-    // command bytes; the ctrl port speaks swtpm's own control protocol and
-    // is used only by the workflow's readiness probe. Neither implements
-    // the Microsoft reference-simulator (mssim) protocol, so TcpTpmDevice
-    // must run in linuxTrm (raw-stream) mode — see the ctor call below.
     private const string SwtpmHost = "127.0.0.1";
     private const int SwtpmCommandPort = 2321;
 
@@ -101,14 +80,6 @@ public class LinuxTpmProtectorTests
         Assert.That(LinuxTpmProtector.TryCreate(new byte[33]), Is.Null);
     }
 
-    /// <summary>
-    /// Round-trip the master through a full provision + encrypt + decrypt
-    /// cycle against a software TPM 2.0 simulator (<c>swtpm</c>) over TCP.
-    /// This is the test that actually validates the TSS.MSR call shape end
-    /// to end — CI installs and starts swtpm before running it. Skips
-    /// silently when nothing is listening on the simulator port (i.e.
-    /// developers running the test suite locally without swtpm).
-    /// </summary>
     [Test]
     public void Round_trip_against_swtpm_simulator()
     {
@@ -126,18 +97,6 @@ public class LinuxTpmProtectorTests
         byte[] expected = master.ToArray();
         var input = master.ToArray();
 
-        // Hand a connected TcpTpmDevice to the protector via the internal
-        // test seam. On success the protector takes ownership and disposes
-        // the device on protector dispose.
-        //
-        // linuxTrm: true is load-bearing. TcpTpmDevice's default (mssim)
-        // mode opens serverPort+1 as a Microsoft-simulator "platform"
-        // channel and blocks forever awaiting a RemoteHandshake ack that
-        // swtpm never sends (TSS.NET socket reads have no timeout — this
-        // hung every ubuntu CI leg at this line until cancelled). Raw-stream
-        // mode uses the single command socket with raw TPM2 framing
-        // (auto-probed via GetRandom), which is what swtpm's TCP server
-        // actually speaks.
         var device = new TcpTpmDevice(SwtpmHost, SwtpmCommandPort, stopTpm: false, linuxTrm: true);
         device.Connect();
 
@@ -168,19 +127,6 @@ public class LinuxTpmProtectorTests
         }
     }
 
-    /// <summary>
-    /// Concurrency regression against the swtpm simulator: a TSS.MSR
-    /// <see cref="Tpm2"/> is a single command/response pipe, so
-    /// <c>LinuxTpmProtector.UnwrapKey</c> must serialise <c>RSA_Decrypt</c>
-    /// on its private gate. Drives parallel unwraps through a decorating
-    /// <see cref="Tpm2Device"/> that counts in-flight
-    /// <see cref="Tpm2Device.DispatchCommand"/> calls — the gate holds if
-    /// that count never exceeds one and every unwrap round-trips the master.
-    /// Gated like <see cref="Round_trip_against_swtpm_simulator"/>: it runs
-    /// only where swtpm is listening (the ubuntu CI leg), because a fake
-    /// <see cref="Tpm2Device"/> would have to answer CreatePrimary / Create /
-    /// Load / RSA_Encrypt / RSA_Decrypt with correctly framed TPM2 responses.
-    /// </summary>
     [Test]
     public void Parallel_unwraps_against_swtpm_never_overlap_on_the_command_pipe()
     {
@@ -242,11 +188,6 @@ public class LinuxTpmProtectorTests
         }
     }
 
-    /// <summary>
-    /// Decorating <see cref="Tpm2Device"/> that forwards everything to the
-    /// wrapped device and records the maximum number of concurrently
-    /// in-flight <see cref="DispatchCommand"/> calls.
-    /// </summary>
     private sealed class ConcurrencyCountingDevice : Tpm2Device
     {
         private readonly Tpm2Device _inner;
@@ -290,13 +231,6 @@ public class LinuxTpmProtectorTests
         }
 
         public override void Connect() => _inner.Connect();
-        // TSS.MSR splits teardown in two: Close() releases the transport
-        // (TcpTpmDevice closes its sockets ONLY here), while Dispose() routes
-        // to Dispose(bool), whose base implementation is empty. Forward each
-        // to its counterpart so the protector's "Close, then Dispose" sequence
-        // actually reaches the wrapped socket — a leaked connection wedges
-        // swtpm for every later test (it serves one TCP client at a time),
-        // which is exactly what timed out CI run 41821078364.
         public override void Close() => _inner.Close();
         protected override void Dispose(bool disposing)
         {
@@ -312,11 +246,6 @@ public class LinuxTpmProtectorTests
         public override bool ImplementsCancel() => _inner.ImplementsCancel();
     }
 
-    /// <summary>
-    /// Best-effort liveness probe: try to TCP-connect to the swtpm command
-    /// port. If the connect succeeds within a short timeout, the simulator
-    /// is up. This avoids a multi-second timeout when no swtpm is running.
-    /// </summary>
     private static bool IsSwtpmListening()
     {
         try
@@ -332,33 +261,12 @@ public class LinuxTpmProtectorTests
     }
 }
 
-/// <summary>
-/// Regression tests for <see cref="LinuxTpmRegistration"/> metadata. Kept
-/// in their own fixture because they are platform-agnostic — the factory
-/// delegate self-skips on non-Linux hosts, but the registration metadata
-/// itself is a property of the call we make to
-/// <see cref="KeyAtRestProtectorFactory.RegisterHardwareBacked"/> regardless
-/// of host.
-/// </summary>
 [TestFixture]
 public class LinuxTpmRegistrationTests
 {
-    /// <summary>
-    /// The load-bearing <c>transientSlotConstrained: true</c> flag on
-    /// <see cref="LinuxTpmRegistration.Register"/>. The whole
-    /// <c>EmitTransientSlotRotationWarning</c> safety net (which warns when
-    /// periodic process-key rotation is paired with a TPM-backed provider)
-    /// depends on this flag. If a future refactor drops the named arg or
-    /// flips it to <see langword="false"/>, this test fails — without it
-    /// the regression would land silently and consumers would get
-    /// <c>TPM_RC_RESOURCES</c> in production with no warning.
-    /// </summary>
     [Test]
     public void Registration_sets_transient_slot_constrained_flag()
     {
-        // Register() is idempotent; the [ModuleInitializer] has likely
-        // already fired by now, but call again as belt-and-braces against
-        // unusual loading scenarios.
         LinuxTpmRegistration.Register();
 
         Assert.That(KeyAtRestProtectorFactory.HasTransientSlotConstrainedProvider(), Is.True,

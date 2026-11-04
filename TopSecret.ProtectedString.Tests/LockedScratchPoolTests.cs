@@ -13,10 +13,6 @@ public class LockedScratchPoolTests
         try
         {
             Assert.That(lease.IsPooled, Is.True);
-            // Chunks are carved in 64-byte units from a window that is
-            // page-aligned in *absolute address* space (the array-index
-            // offset is arbitrary), so the char view's 2-byte alignment
-            // always holds. Verify both views round-trip.
             var chars = lease.Chars(32);
             chars.Fill('x');
             Assert.That(chars[31], Is.EqualTo('x'));
@@ -62,9 +58,6 @@ public class LockedScratchPoolTests
         var c = LockedScratchPool.Rent(64);
         try
         {
-            // If the double return had corrupted the free list, b and c would
-            // alias the same chunk: writing through one would be visible
-            // through the other.
             b.Bytes(64).Fill(1);
             Assert.That(c.Bytes(64).IndexOfAnyExcept((byte)0), Is.EqualTo(-1),
                 "two live leases must never share a chunk");

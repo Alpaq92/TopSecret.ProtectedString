@@ -4,12 +4,6 @@ using TopSecret;
 
 namespace TopSecret.ProtectedBlobTests;
 
-/// <summary>
-/// <c>FromStreamAsync</c> / <c>WriteToAsync</c> mirror their synchronous
-/// siblings, and the <see cref="ReadOnlySequence{T}"/> constructors mirror
-/// the span constructor across every segment layout a <c>PipeReader</c> can
-/// hand out.
-/// </summary>
 [TestFixture]
 public class AsyncStreamTests
 {
@@ -17,7 +11,6 @@ public class AsyncStreamTests
 
     private static byte[] RandomBytes(int count) => RandomNumberGenerator.GetBytes(count);
 
-    /// <summary>Non-seekable, ragged, genuinely asynchronous reads (yields before every read); writes are async too and honour the token.</summary>
     private sealed class AsyncOnlyStream(byte[] content) : Stream
     {
         private readonly MemoryStream _inner = new(content);
@@ -209,7 +202,6 @@ public class ReadOnlySequenceIngressTests
         }
     }
 
-    /// <summary>Splits <paramref name="content"/> into a linked multi-segment sequence at the given cut points.</summary>
     private static ReadOnlySequence<byte> Segmented(byte[] content, params int[] segmentLengths)
     {
         int consumed = 0;

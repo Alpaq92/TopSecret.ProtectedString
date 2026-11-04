@@ -22,9 +22,6 @@ public class Argon2CalibratorTests
     [Test]
     public void Tune_scales_memory_up_for_a_larger_target()
     {
-        // A modest but non-trivial target: the calibrator should raise memory
-        // above the floor to reach it (unless the host is unusually slow, in
-        // which case the floor already meets the target — allowed).
         var floorTime = Argon2Calibrator.Tune(TimeSpan.FromMilliseconds(1)).Measured;
         var target = TimeSpan.FromMilliseconds(floorTime.TotalMilliseconds * 4);
 

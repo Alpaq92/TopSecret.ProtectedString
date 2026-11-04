@@ -9,33 +9,9 @@ using TopSecret.Analyzers;
 
 namespace TopSecret.Analyzers.Tests;
 
-/// <summary>
-/// Hosts <see cref="EscapingPlaintextAnalyzer"/> against in-memory C#
-/// snippets and asserts on the diagnostics it emits. Guards against
-/// silent regressions in the analyzer's detection rules — analyzer
-/// bugs (especially false negatives) are invisible in normal CI: the
-/// analyzer "just works" until a user writes the missed pattern.
-/// </summary>
-/// <remarks>
-/// Each test compiles a snippet with a stable reference set (the same
-/// runtime <c>TRUSTED_PLATFORM_ASSEMBLIES</c> the test process loaded
-/// itself from, plus the real <c>TopSecret.ProtectedString</c> assembly),
-/// runs the analyzer via <see cref="Compilation.WithAnalyzers"/>, and
-/// asserts on the resulting <see cref="Diagnostic"/> set. This is the
-/// minimum viable testing surface — no codefix, no document workspace,
-/// no cross-version compatibility concerns with the
-/// <c>Microsoft.CodeAnalysis.Testing</c> harness packages.
-/// </remarks>
 [TestFixture]
 public class EscapingPlaintextAnalyzerTests
 {
-    /// <summary>
-    /// Reference assemblies for the test compilation: every DLL the test
-    /// host is itself loading, plus the main <c>TopSecret.ProtectedString</c>
-    /// library. Computed once per process — building the same set on every
-    /// test would be wasteful and serialises GC pressure on the analyzer
-    /// host.
-    /// </summary>
     private static readonly Lazy<ImmutableArray<MetadataReference>> s_references = new(() =>
     {
         var trusted = (string?)AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES")
@@ -56,12 +32,6 @@ public class EscapingPlaintextAnalyzerTests
         return refs.ToImmutableArray();
     });
 
-    /// <summary>
-    /// Compiles <paramref name="source"/> in-memory, runs
-    /// <see cref="EscapingPlaintextAnalyzer"/> against it, and returns the
-    /// diagnostics it emitted (plus any compiler errors, so a typo in the
-    /// snippet surfaces loudly instead of silently producing a clean run).
-    /// </summary>
     private static async Task<ImmutableArray<Diagnostic>> RunAsync(string source)
     {
         var syntaxTree = CSharpSyntaxTree.ParseText(
@@ -74,9 +44,6 @@ public class EscapingPlaintextAnalyzerTests
             references: s_references.Value,
             options: new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
 
-        // Surface compile errors loudly. A snippet that fails to compile
-        // would otherwise produce zero analyzer diagnostics and a passing
-        // negative-case test for the wrong reason.
         var compileErrors = compilation.GetDiagnostics()
             .Where(d => d.Severity == DiagnosticSeverity.Error)
             .ToList();
@@ -92,11 +59,6 @@ public class EscapingPlaintextAnalyzerTests
         return await withAnalyzers.GetAnalyzerDiagnosticsAsync();
     }
 
-    /// <summary>
-    /// Asserts <paramref name="diagnostics"/> contains exactly the IDs in
-    /// <paramref name="expectedIds"/>, in any order. A mismatch dumps the
-    /// full diagnostic list so the failure message is useful.
-    /// </summary>
     private static void AssertDiagnosticIds(
         ImmutableArray<Diagnostic> diagnostics,
         params string[] expectedIds)
@@ -158,10 +120,6 @@ public class EscapingPlaintextAnalyzerTests
     [Test]
     public async Task TPS001_fires_on_StringBuilder_Append_inside_Access_lambda()
     {
-        // The analyzer flags any method call on System.String or
-        // System.Text.StringBuilder that receives the plaintext parameter
-        // — `sb.Append(plain)` parks the chars in StringBuilder's
-        // internal buffer, which lives past the callback.
         var d = await RunAsync("""
             using System.Text;
             using TopSecret;
@@ -186,10 +144,6 @@ public class EscapingPlaintextAnalyzerTests
     [Test]
     public async Task TPS001_fires_on_new_string_inside_ReadOnlySpan_Access_lambda()
     {
-        // The ReadOnlySpan overload structurally prevents capture, but a
-        // caller can still copy the contents into a managed string. The
-        // analyzer must catch that — TPS001 flags the *copy*, not the
-        // capture.
         var d = await RunAsync("""
             using System;
             using TopSecret;
@@ -300,9 +254,6 @@ public class EscapingPlaintextAnalyzerTests
     [Test]
     public async Task No_diagnostic_when_using_plain_inline_with_no_copy()
     {
-        // Using the parameter inline (e.g., reading its length, encoding
-        // it to a stack buffer) is exactly the safe pattern the library
-        // documents.
         var d = await RunAsync("""
             using System;
             using System.Text;
@@ -319,15 +270,12 @@ public class EscapingPlaintextAnalyzerTests
                 }
             }
             """);
-        AssertDiagnosticIds(d /* no expected diagnostics */);
+        AssertDiagnosticIds(d);
     }
 
     [Test]
     public async Task No_TPS002_when_local_is_declared_inside_lambda()
     {
-        // A local declared inside the lambda dies with the frame.
-        // Assigning the parameter to it is fine — the analyzer must
-        // distinguish inside-the-lambda locals from captured locals.
         var d = await RunAsync("""
             using TopSecret;
             class C
@@ -344,15 +292,12 @@ public class EscapingPlaintextAnalyzerTests
                 }
             }
             """);
-        AssertDiagnosticIds(d /* no expected diagnostics */);
+        AssertDiagnosticIds(d);
     }
 
     [Test]
     public async Task No_diagnostic_when_new_string_is_outside_an_Access_lambda()
     {
-        // The analyzer is scoped to ProtectedString.Access(...) callbacks.
-        // A `new string(...)` elsewhere in the program — including with
-        // a parameter named `plain` — must not trigger.
         var d = await RunAsync("""
             class C
             {
@@ -363,15 +308,12 @@ public class EscapingPlaintextAnalyzerTests
                 }
             }
             """);
-        AssertDiagnosticIds(d /* no expected diagnostics */);
+        AssertDiagnosticIds(d);
     }
 
     [Test]
     public async Task No_diagnostic_for_Access_on_unrelated_type_named_Access()
     {
-        // The analyzer matches the containing type by FQN
-        // (`TopSecret.ProtectedString`). A method also named `Access` on a
-        // different type must not produce diagnostics.
         var d = await RunAsync("""
             using System;
             class Other
@@ -394,7 +336,7 @@ public class EscapingPlaintextAnalyzerTests
                 }
             }
             """);
-        AssertDiagnosticIds(d /* no expected diagnostics */);
+        AssertDiagnosticIds(d);
     }
 
     // ---- Local functions inside Access lambdas -------------------------
@@ -402,9 +344,6 @@ public class EscapingPlaintextAnalyzerTests
     [Test]
     public async Task TPS001_fires_inside_local_function_nested_in_Access_lambda()
     {
-        // The local function's body executes synchronously inside the
-        // Access window — a leak there is the same kind of leak as a
-        // direct lambda-body leak, and the analyzer must catch it.
         var d = await RunAsync("""
             using TopSecret;
             class C
@@ -458,12 +397,6 @@ public class EscapingPlaintextAnalyzerTests
     [Test]
     public async Task No_diagnostic_for_local_function_outside_any_Access_call()
     {
-        // A local function defined outside any Access lambda — even one
-        // with a char[] parameter that copies it to a string — must not
-        // be flagged. Without semantic linking back from `ps.Access(Inner)`
-        // call sites to this local function, we cannot prove the chars
-        // are plaintext from a ProtectedString. Documented as a known
-        // limitation.
         var d = await RunAsync("""
             using TopSecret;
             class C
@@ -477,13 +410,7 @@ public class EscapingPlaintextAnalyzerTests
                 }
             }
             """);
-        // The `new string(more)` inside Inner is NOT flagged (we don't
-        // chase symbol references). The `Inner(outer)` call passes the
-        // outer plaintext to a method, but that's not a stringification
-        // pattern the analyzer recognises either. This test pins the
-        // documented limitation: a local function decoupled from its
-        // call site is out of scope.
-        AssertDiagnosticIds(d /* no expected diagnostics */);
+        AssertDiagnosticIds(d);
     }
 
     // ---- TPS001: Encoding.GetString over the plaintext ------------------
@@ -491,10 +418,6 @@ public class EscapingPlaintextAnalyzerTests
     [Test]
     public async Task TPS001_fires_on_Encoding_GetString_over_span_param()
     {
-        // Encoding.GetString decodes the plaintext bytes straight into a
-        // managed string — the same escape class as new string(plain).
-        // The analyzer must see through MemoryMarshal.AsBytes, which is
-        // just a reinterpreted span over the same memory.
         var d = await RunAsync("""
             using System;
             using System.Runtime.InteropServices;
@@ -518,10 +441,6 @@ public class EscapingPlaintextAnalyzerTests
     [Test]
     public async Task TPS001_fires_on_Encoding_GetString_over_array_param_via_AsSpan()
     {
-        // Same sink through the char[] overload, wrapped twice:
-        // plain.AsSpan() then MemoryMarshal.AsBytes(...). Both wrappers
-        // are spans over the original plaintext, so the copy-to-string
-        // still leaks it.
         var d = await RunAsync("""
             using System;
             using System.Runtime.InteropServices;
@@ -547,9 +466,6 @@ public class EscapingPlaintextAnalyzerTests
     [Test]
     public async Task No_TPS001_when_Encoding_GetString_decodes_unrelated_buffer()
     {
-        // Decoding some other buffer inside the Access window is a
-        // legitimate operation — only the plaintext parameter (or a span
-        // over it) as an argument is flagged.
         var d = await RunAsync("""
             using System;
             using System.Text;
@@ -567,7 +483,7 @@ public class EscapingPlaintextAnalyzerTests
                 }
             }
             """);
-        AssertDiagnosticIds(d /* no expected diagnostics */);
+        AssertDiagnosticIds(d);
     }
 
     // ---- TPS001: string.Create with the plaintext as state --------------
@@ -575,9 +491,6 @@ public class EscapingPlaintextAnalyzerTests
     [Test]
     public async Task TPS001_fires_on_string_Create_with_plaintext_state()
     {
-        // string.Create is a static method on System.String receiving the
-        // plaintext by value as its state argument — the entire point of
-        // the call is to bake that state into a managed string.
         var d = await RunAsync("""
             using System;
             using TopSecret;
@@ -621,9 +534,6 @@ public class EscapingPlaintextAnalyzerTests
     [Test]
     public async Task No_TPS001_when_string_Create_state_is_not_plaintext()
     {
-        // string.Create with unrelated state inside an Access callback is
-        // a legitimate sink — only the plaintext parameter as an argument
-        // is flagged.
         var d = await RunAsync("""
             using System;
             using TopSecret;
@@ -639,7 +549,7 @@ public class EscapingPlaintextAnalyzerTests
                 }
             }
             """);
-        AssertDiagnosticIds(d /* no expected diagnostics */);
+        AssertDiagnosticIds(d);
     }
 
     // ---- TPS003: plaintext copied into a fresh heap array ---------------
@@ -715,15 +625,12 @@ public class EscapingPlaintextAnalyzerTests
                 }
             }
             """);
-        AssertDiagnosticIds(d /* no expected diagnostics */);
+        AssertDiagnosticIds(d);
     }
 
     [Test]
     public async Task No_TPS001_when_string_constructor_takes_char_only()
     {
-        // `new string('x', 5)` is the (char, int) ctor — not a copy of the
-        // plaintext. Must not fire even when nominally inside an Access
-        // callback.
         var d = await RunAsync("""
             using TopSecret;
             class C
@@ -740,7 +647,7 @@ public class EscapingPlaintextAnalyzerTests
                 }
             }
             """);
-        AssertDiagnosticIds(d /* no expected diagnostics */);
+        AssertDiagnosticIds(d);
     }
     // ---- Span-aware string sinks (new string / Concat / Append) ----------
 
@@ -989,7 +896,7 @@ public class EscapingPlaintextAnalyzerTests
                 }
             }
             """);
-        AssertDiagnosticIds(d /* no expected diagnostics */);
+        AssertDiagnosticIds(d);
     }
 
     [Test]
@@ -1035,7 +942,7 @@ public class EscapingPlaintextAnalyzerTests
                 }
             }
             """);
-        AssertDiagnosticIds(d /* no expected diagnostics */);
+        AssertDiagnosticIds(d);
     }
 
     // ---- TPS003: Encoding.GetBytes and array range copies ---------------
@@ -1068,9 +975,6 @@ public class EscapingPlaintextAnalyzerTests
     [Test]
     public async Task No_TPS003_when_Encoding_GetBytes_writes_into_caller_buffer()
     {
-        // The (chars, index, count, bytes, byteIndex) overload writes
-        // into a caller-supplied buffer and returns int — no new copy
-        // the analyzer should complain about.
         var d = await RunAsync("""
             using System.Text;
             using TopSecret;
@@ -1089,7 +993,7 @@ public class EscapingPlaintextAnalyzerTests
                 }
             }
             """);
-        AssertDiagnosticIds(d /* no expected diagnostics */);
+        AssertDiagnosticIds(d);
     }
 
     [Test]
@@ -1135,7 +1039,7 @@ public class EscapingPlaintextAnalyzerTests
                 }
             }
             """);
-        AssertDiagnosticIds(d /* no expected diagnostics */);
+        AssertDiagnosticIds(d);
     }
 
     // ---- TPS002: returning / storing the array parameter ----------------
@@ -1196,7 +1100,7 @@ public class EscapingPlaintextAnalyzerTests
                 }
             }
             """);
-        AssertDiagnosticIds(d /* no expected diagnostics */);
+        AssertDiagnosticIds(d);
     }
 
     [Test]
@@ -1220,7 +1124,7 @@ public class EscapingPlaintextAnalyzerTests
                 }
             }
             """);
-        AssertDiagnosticIds(d /* no expected diagnostics */);
+        AssertDiagnosticIds(d);
     }
 
     [Test]
@@ -1292,7 +1196,7 @@ public class EscapingPlaintextAnalyzerTests
                 }
             }
             """);
-        AssertDiagnosticIds(d /* no expected diagnostics */);
+        AssertDiagnosticIds(d);
     }
 
     // ---- Lambda wrapped in a cast / parentheses -------------------------
@@ -1369,7 +1273,7 @@ public class EscapingPlaintextAnalyzerTests
                 }
             }
             """);
-        AssertDiagnosticIds(d /* no expected diagnostics */);
+        AssertDiagnosticIds(d);
     }
 
     [Test]
@@ -1422,7 +1326,7 @@ public class EscapingPlaintextAnalyzerTests
                 }
             }
             """);
-        AssertDiagnosticIds(d /* no expected diagnostics */);
+        AssertDiagnosticIds(d);
     }
 
     [Test]
@@ -1445,6 +1349,6 @@ public class EscapingPlaintextAnalyzerTests
                 }
             }
             """);
-        AssertDiagnosticIds(d /* no expected diagnostics */);
+        AssertDiagnosticIds(d);
     }
 }

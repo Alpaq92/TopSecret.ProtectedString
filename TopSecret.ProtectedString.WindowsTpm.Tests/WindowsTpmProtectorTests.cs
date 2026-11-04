@@ -4,13 +4,6 @@ using TopSecret.WindowsTpm;
 
 namespace TopSecret.WindowsTpm.Tests;
 
-/// <summary>
-/// Smoke tests for the Windows TPM protector. The factory and provider are
-/// internal to <c>TopSecret.ProtectedString.WindowsTpm</c>; these tests reach
-/// them via <c>InternalsVisibleTo</c>. Each test self-skips when no TPM is
-/// available so the suite can run on contributor machines without a TPM and
-/// on Linux / macOS CI legs without conditional gating in the workflow file.
-/// </summary>
 [TestFixture]
 [Platform(Include = "Win")]
 public class WindowsTpmProtectorTests
@@ -84,33 +77,12 @@ public class WindowsTpmProtectorTests
     }
 }
 
-/// <summary>
-/// Regression tests for <see cref="WindowsTpmRegistration"/> metadata. Kept
-/// in their own fixture because they are platform-agnostic — the factory
-/// delegate self-skips on non-Windows hosts, but the registration metadata
-/// itself is a property of the call we make to
-/// <see cref="KeyAtRestProtectorFactory.RegisterHardwareBacked"/> regardless
-/// of host.
-/// </summary>
 [TestFixture]
 public class WindowsTpmRegistrationTests
 {
-    /// <summary>
-    /// The load-bearing <c>transientSlotConstrained: true</c> flag on
-    /// <see cref="WindowsTpmRegistration.Register"/>. The whole
-    /// <c>EmitTransientSlotRotationWarning</c> safety net (which warns when
-    /// periodic process-key rotation is paired with a TPM-backed provider)
-    /// depends on this flag. If a future refactor drops the named arg or
-    /// flips it to <see langword="false"/>, this test fails — without it
-    /// the regression would land silently and consumers would get
-    /// <c>TPM_RC_RESOURCES</c> in production with no warning.
-    /// </summary>
     [Test]
     public void Registration_sets_transient_slot_constrained_flag()
     {
-        // Register() is idempotent; the [ModuleInitializer] has likely
-        // already fired by now, but call again as belt-and-braces against
-        // unusual loading scenarios.
         WindowsTpmRegistration.Register();
 
         Assert.That(KeyAtRestProtectorFactory.HasTransientSlotConstrainedProvider(), Is.True,

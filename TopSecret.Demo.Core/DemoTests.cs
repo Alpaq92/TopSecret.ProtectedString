@@ -3,20 +3,6 @@ using NUnit.Framework;
 
 namespace TopSecret.Demo;
 
-/// <summary>
-/// A representative, environment-aware slice of the library's behaviour that
-/// the demo runs live via the reflection-based <see cref="DemoTestRunner"/>.
-/// Tests that cannot run in the current environment call
-/// <see cref="Assert.Ignore(string)"/> so they surface as SKIP rather than
-/// FAIL — e.g. the hardware-backed tier where no secure element is present.
-/// Inputs come from <see cref="DemoInputs"/>, so every run exercises fresh
-/// random values.
-/// </summary>
-/// <remarks>
-/// This is deliberately a small smoke slice; the exhaustive suites
-/// (tamper matrices, wire-format pinning, rotation, TPM) live in the
-/// <c>*.Tests</c> projects and run in CI.
-/// </remarks>
 [TestFixture]
 public class DemoTests
 {
@@ -68,9 +54,6 @@ public class DemoTests
     [Test]
     public void ProtectedBlob_reports_chunk_layout()
     {
-        // The exhaustive fail-closed tamper matrix lives in TamperTests (CI);
-        // here we assert the public chunking contract the reads rely on. The
-        // random tail stays in [1, MinChunkSize) so ChunkCount is always 3.
         byte[] original = RandomNumberGenerator.GetBytes(
             2 * ProtectedBlob.MinChunkSize + RandomNumberGenerator.GetInt32(1, ProtectedBlob.MinChunkSize));
         using var blob = new ProtectedBlob(original.AsSpan(), ProtectedBlob.MinChunkSize);
@@ -96,9 +79,6 @@ public class DemoTests
     [Test]
     public void Argon2id_verifies_the_right_credential()
     {
-        // Runs everywhere, including the single-threaded WASM runtime: at
-        // the library's default parallelism of 1, the KDF never touches the
-        // thread pool.
         string credential = DemoInputs.RandomSecret();
         var salt = RandomNumberGenerator.GetBytes(16);
         using var secret = new ProtectedString(credential.AsSpan());

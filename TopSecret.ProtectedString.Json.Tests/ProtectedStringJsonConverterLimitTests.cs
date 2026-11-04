@@ -3,11 +3,6 @@ using TopSecret;
 
 namespace TopSecret.JsonTests;
 
-/// <summary>
-/// The converter refuses oversized JSON strings before allocating any scratch
-/// for them, so a mis-bound field (a certificate body, a file) cannot grow the
-/// locked build buffer until the memory-locking policy fires.
-/// </summary>
 [TestFixture]
 public class ProtectedStringJsonConverterLimitTests
 {

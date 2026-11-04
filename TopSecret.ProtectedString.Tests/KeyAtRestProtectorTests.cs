@@ -4,14 +4,6 @@ using TopSecret;
 
 namespace TopSecret.ProtectedStringTests;
 
-/// <summary>
-/// Direct unit tests for the individual <see cref="KeyAtRestProtector"/>
-/// implementations and the factory's registration surface. The end-to-end
-/// path through <see cref="ProtectedString"/> is covered by
-/// <see cref="ProtectedStringTests"/>; these tests target the seams that
-/// the end-to-end suite cannot reach without spinning up a fresh process
-/// per protection mode.
-/// </summary>
 public class KeyAtRestProtectorTests
 {
     // ---- HkdfWrapProtector ---------------------------------------------
@@ -169,9 +161,6 @@ public class KeyAtRestProtectorTests
         {
             var protector = AesGcmWrapProtector.TryCreate(RandomNumberGenerator.GetBytes(32))!;
 
-            // DisposableKeyAtRestProtector guards Dispose with an Interlocked
-            // flag so ProtectorLifetime.Release / MarkSuperseded racing each
-            // other cannot double-release.
             Parallel.For(0, 8, _ => protector.Dispose());
             Assert.DoesNotThrow(() => protector.Dispose());
             Assert.Throws<ObjectDisposedException>(() => protector.UnwrapKey());
@@ -183,10 +172,6 @@ public class KeyAtRestProtectorTests
     [TestFixture]
     public class TtlCaching
     {
-        /// <summary>
-        /// Test double that counts UnwrapKey calls so we can assert on
-        /// cache hits vs. misses.
-        /// </summary>
         private sealed class CountingProtector : KeyAtRestProtector
         {
             private readonly byte[] _master;
@@ -257,9 +242,6 @@ public class KeyAtRestProtectorTests
             using (cache.UnwrapKey()) { }
             Assert.That(inner.UnwrapCount, Is.EqualTo(1));
 
-            // Sleep past the TTL. The decorator uses Environment.TickCount64
-            // which advances at OS clock resolution; 200 ms is comfortably
-            // past 50 ms on every platform we target.
             Thread.Sleep(200);
 
             using (cache.UnwrapKey()) { }
@@ -291,15 +273,6 @@ public class KeyAtRestProtectorTests
             Assert.DoesNotThrow(() => cache.Dispose());
         }
 
-        /// <summary>
-        /// Regression: a TTL beyond the <see cref="Timer"/> horizon
-        /// (<c>&gt; 4294967294 ms</c>) used to make <c>Timer.Change</c> throw
-        /// AFTER <c>_cachedKey</c> and a far-future expiry were already
-        /// published; the cleanup then zeroed the very buffer the cache still
-        /// pointed at, so every later <c>UnwrapKey</c> handed out an all-zero
-        /// key under a stale expiry. Whatever the first call does (throw or
-        /// succeed), a subsequent call must never return an all-zero key.
-        /// </summary>
         [Test]
         public void Ttl_beyond_timer_horizon_never_yields_an_all_zero_key()
         {
@@ -472,11 +445,6 @@ public class KeyAtRestProtectorTests
         [SetUp]
         public void Setup()
         {
-            // Snapshot any registrations a previous test (or a module
-            // initializer in a referenced assembly) might have added, so we
-            // can isolate this fixture's mutations from the rest of the suite.
-            // Routed through TestAccessors to bypass the [Obsolete(error: true)]
-            // compile-time block on ResetRegistrationsForTests.
             TestAccessors.ResetFactoryRegistrations();
         }
 
