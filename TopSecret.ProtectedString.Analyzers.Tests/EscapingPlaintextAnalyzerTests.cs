@@ -742,4 +742,709 @@ public class EscapingPlaintextAnalyzerTests
             """);
         AssertDiagnosticIds(d /* no expected diagnostics */);
     }
+    // ---- Span-aware string sinks (new string / Concat / Append) ----------
+
+    [Test]
+    public async Task TPS001_fires_on_new_string_over_AsSpan_slice_of_array_param()
+    {
+        // `new string(plain.AsSpan(0, 4))` copies the same bytes as
+        // `new string(plain)` — the span wrapper must not hide the sink.
+        var d = await RunAsync("""
+            using System;
+            using TopSecret;
+            class C
+            {
+                void M(ProtectedString ps)
+                {
+            #pragma warning disable CS0618
+                    ps.Access((char[] plain) =>
+                    {
+                        var leak = new string(plain.AsSpan(0, 4));
+                        System.GC.KeepAlive(leak);
+                    });
+            #pragma warning restore CS0618
+                }
+            }
+            """);
+        AssertDiagnosticIds(d, "TPS001");
+    }
+
+    [Test]
+    public async Task TPS001_fires_on_string_Concat_with_span_over_array_param()
+    {
+        var d = await RunAsync("""
+            using System;
+            using TopSecret;
+            class C
+            {
+                void M(ProtectedString ps)
+                {
+            #pragma warning disable CS0618
+                    ps.Access((char[] plain) =>
+                    {
+                        var leak = string.Concat(plain.AsSpan(), "x");
+                        System.GC.KeepAlive(leak);
+                    });
+            #pragma warning restore CS0618
+                }
+            }
+            """);
+        AssertDiagnosticIds(d, "TPS001");
+    }
+
+    [Test]
+    public async Task TPS001_fires_on_StringBuilder_Append_of_span_over_array_param()
+    {
+        var d = await RunAsync("""
+            using System;
+            using System.Text;
+            using TopSecret;
+            class C
+            {
+                void M(ProtectedString ps)
+                {
+                    var sb = new StringBuilder();
+            #pragma warning disable CS0618
+                    ps.Access((char[] plain) =>
+                    {
+                        sb.Append(plain.AsSpan());
+                    });
+            #pragma warning restore CS0618
+                    System.GC.KeepAlive(sb);
+                }
+            }
+            """);
+        AssertDiagnosticIds(d, "TPS001");
+    }
+
+    [Test]
+    public async Task TPS001_fires_on_StringBuilder_Append_of_span_param()
+    {
+        var d = await RunAsync("""
+            using System;
+            using System.Text;
+            using TopSecret;
+            class C
+            {
+                void M(ProtectedString ps)
+                {
+                    var sb = new StringBuilder();
+                    ps.Access((ReadOnlySpan<char> plain) =>
+                    {
+                        sb.Append(plain);
+                    });
+                    System.GC.KeepAlive(sb);
+                }
+            }
+            """);
+        AssertDiagnosticIds(d, "TPS001");
+    }
+
+    // ---- TPS001: slices, ranges, interpolation, Convert -----------------
+
+    [Test]
+    public async Task TPS001_fires_on_Slice_ToString_of_span_param()
+    {
+        var d = await RunAsync("""
+            using System;
+            using TopSecret;
+            class C
+            {
+                void M(ProtectedString ps)
+                {
+                    ps.Access((ReadOnlySpan<char> plain) =>
+                    {
+                        var leak = plain.Slice(1).ToString();
+                        System.GC.KeepAlive(leak);
+                    });
+                }
+            }
+            """);
+        AssertDiagnosticIds(d, "TPS001");
+    }
+
+    [Test]
+    public async Task TPS001_fires_on_range_index_ToString_of_span_param()
+    {
+        var d = await RunAsync("""
+            using System;
+            using TopSecret;
+            class C
+            {
+                void M(ProtectedString ps)
+                {
+                    ps.Access((ReadOnlySpan<char> plain) =>
+                    {
+                        var leak = plain[..2].ToString();
+                        System.GC.KeepAlive(leak);
+                    });
+                }
+            }
+            """);
+        AssertDiagnosticIds(d, "TPS001");
+    }
+
+    [Test]
+    public async Task TPS003_fires_on_Slice_ToArray_of_span_param()
+    {
+        var d = await RunAsync("""
+            using System;
+            using TopSecret;
+            class C
+            {
+                void M(ProtectedString ps)
+                {
+                    ps.Access((ReadOnlySpan<char> plain) =>
+                    {
+                        var copy = plain.Slice(1, 2).ToArray();
+                        System.GC.KeepAlive(copy);
+                    });
+                }
+            }
+            """);
+        AssertDiagnosticIds(d, "TPS003");
+    }
+
+    [Test]
+    public async Task TPS001_fires_on_string_interpolation_of_span_param()
+    {
+        var d = await RunAsync("""
+            using System;
+            using TopSecret;
+            class C
+            {
+                void M(ProtectedString ps)
+                {
+                    ps.Access((ReadOnlySpan<char> plain) =>
+                    {
+                        var leak = $"pw={plain}";
+                        System.GC.KeepAlive(leak);
+                    });
+                }
+            }
+            """);
+        AssertDiagnosticIds(d, "TPS001");
+    }
+
+    [Test]
+    public async Task TPS001_fires_on_string_interpolation_of_range_slice_of_span_param()
+    {
+        var d = await RunAsync("""
+            using System;
+            using TopSecret;
+            class C
+            {
+                void M(ProtectedString ps)
+                {
+                    ps.Access((ReadOnlySpan<char> plain) =>
+                    {
+                        var leak = $"prefix={plain[..3]}";
+                        System.GC.KeepAlive(leak);
+                    });
+                }
+            }
+            """);
+        AssertDiagnosticIds(d, "TPS001");
+    }
+
+    [Test]
+    public async Task TPS001_fires_on_string_interpolation_of_array_param()
+    {
+        var d = await RunAsync("""
+            using TopSecret;
+            class C
+            {
+                void M(ProtectedString ps)
+                {
+            #pragma warning disable CS0618
+                    ps.Access((char[] plain) =>
+                    {
+                        var leak = $"{plain}";
+                        System.GC.KeepAlive(leak);
+                    });
+            #pragma warning restore CS0618
+                }
+            }
+            """);
+        AssertDiagnosticIds(d, "TPS001");
+    }
+
+    [Test]
+    public async Task No_TPS001_when_interpolation_uses_plain_Length()
+    {
+        // Interpolating a scalar derived from the plaintext (its length)
+        // does not copy the secret — must stay clean.
+        var d = await RunAsync("""
+            using System;
+            using TopSecret;
+            class C
+            {
+                void M(ProtectedString ps)
+                {
+                    ps.Access((ReadOnlySpan<char> plain) =>
+                    {
+                        var s = $"length={plain.Length}";
+                        System.GC.KeepAlive(s);
+                    });
+                }
+            }
+            """);
+        AssertDiagnosticIds(d /* no expected diagnostics */);
+    }
+
+    [Test]
+    public async Task TPS001_fires_on_Convert_ToBase64String_over_plaintext_bytes()
+    {
+        // Base64 is a reversible textual encoding — the resulting string
+        // *is* the secret, just spelled differently.
+        var d = await RunAsync("""
+            using System;
+            using System.Runtime.InteropServices;
+            using TopSecret;
+            class C
+            {
+                void M(ProtectedString ps)
+                {
+                    ps.Access((ReadOnlySpan<char> plain) =>
+                    {
+                        var leak = Convert.ToBase64String(MemoryMarshal.AsBytes(plain));
+                        System.GC.KeepAlive(leak);
+                    });
+                }
+            }
+            """);
+        AssertDiagnosticIds(d, "TPS001");
+    }
+
+    [Test]
+    public async Task No_TPS001_when_Convert_ToBase64String_encodes_unrelated_buffer()
+    {
+        var d = await RunAsync("""
+            using System;
+            using TopSecret;
+            class C
+            {
+                void M(ProtectedString ps)
+                {
+                    var salt = new byte[] { 1, 2, 3 };
+                    ps.Access((ReadOnlySpan<char> plain) =>
+                    {
+                        var s = Convert.ToBase64String(salt);
+                        System.GC.KeepAlive(s);
+                    });
+                }
+            }
+            """);
+        AssertDiagnosticIds(d /* no expected diagnostics */);
+    }
+
+    // ---- TPS003: Encoding.GetBytes and array range copies ---------------
+
+    [Test]
+    public async Task TPS003_fires_on_Encoding_GetBytes_returning_array_from_array_param()
+    {
+        // Encoding.GetBytes(char[]) returns a fresh byte[] holding the
+        // encoded secret — a heap copy the library never zeroes.
+        var d = await RunAsync("""
+            using System.Text;
+            using TopSecret;
+            class C
+            {
+                void M(ProtectedString ps)
+                {
+            #pragma warning disable CS0618
+                    ps.Access((char[] plain) =>
+                    {
+                        var copy = Encoding.UTF8.GetBytes(plain);
+                        System.GC.KeepAlive(copy);
+                    });
+            #pragma warning restore CS0618
+                }
+            }
+            """);
+        AssertDiagnosticIds(d, "TPS003");
+    }
+
+    [Test]
+    public async Task No_TPS003_when_Encoding_GetBytes_writes_into_caller_buffer()
+    {
+        // The (chars, index, count, bytes, byteIndex) overload writes
+        // into a caller-supplied buffer and returns int — no new copy
+        // the analyzer should complain about.
+        var d = await RunAsync("""
+            using System.Text;
+            using TopSecret;
+            class C
+            {
+                void M(ProtectedString ps)
+                {
+            #pragma warning disable CS0618
+                    ps.Access((char[] plain) =>
+                    {
+                        var dest = new byte[Encoding.UTF8.GetMaxByteCount(plain.Length)];
+                        int n = Encoding.UTF8.GetBytes(plain, 0, plain.Length, dest, 0);
+                        System.GC.KeepAlive(n);
+                    });
+            #pragma warning restore CS0618
+                }
+            }
+            """);
+        AssertDiagnosticIds(d /* no expected diagnostics */);
+    }
+
+    [Test]
+    public async Task TPS003_fires_on_range_index_of_array_param()
+    {
+        // `plain[..n]` on a char[] compiles to RuntimeHelpers.GetSubArray
+        // — a fresh heap array holding a copy of the secret.
+        var d = await RunAsync("""
+            using TopSecret;
+            class C
+            {
+                void M(ProtectedString ps)
+                {
+            #pragma warning disable CS0618
+                    ps.Access((char[] plain) =>
+                    {
+                        var copy = plain[..2];
+                        System.GC.KeepAlive(copy);
+                    });
+            #pragma warning restore CS0618
+                }
+            }
+            """);
+        AssertDiagnosticIds(d, "TPS003");
+    }
+
+    [Test]
+    public async Task No_TPS003_when_range_index_is_on_span_param()
+    {
+        // Re-slicing a span is a view, not a copy.
+        var d = await RunAsync("""
+            using System;
+            using TopSecret;
+            class C
+            {
+                int M(ProtectedString ps)
+                {
+                    return ps.Access((ReadOnlySpan<char> plain) =>
+                    {
+                        var head = plain[..2];
+                        return head.Length;
+                    });
+                }
+            }
+            """);
+        AssertDiagnosticIds(d /* no expected diagnostics */);
+    }
+
+    // ---- TPS002: returning / storing the array parameter ----------------
+
+    [Test]
+    public async Task TPS002_fires_when_expression_bodied_Func_lambda_returns_array_param()
+    {
+        // `ps.Access(p => p)` hands the caller the very array the library
+        // zeroes on return.
+        var d = await RunAsync("""
+            using TopSecret;
+            class C
+            {
+                char[] M(ProtectedString ps)
+                {
+            #pragma warning disable CS0618
+                    return ps.Access((char[] p) => p);
+            #pragma warning restore CS0618
+                }
+            }
+            """);
+        AssertDiagnosticIds(d, "TPS002");
+    }
+
+    [Test]
+    public async Task TPS002_fires_when_block_bodied_Func_lambda_returns_array_param()
+    {
+        var d = await RunAsync("""
+            using TopSecret;
+            class C
+            {
+                char[] M(ProtectedString ps)
+                {
+            #pragma warning disable CS0618
+                    return ps.Access((char[] p) =>
+                    {
+                        return p;
+                    });
+            #pragma warning restore CS0618
+                }
+            }
+            """);
+        AssertDiagnosticIds(d, "TPS002");
+    }
+
+    [Test]
+    public async Task No_TPS002_when_Func_lambda_returns_scalar_derived_from_array_param()
+    {
+        var d = await RunAsync("""
+            using TopSecret;
+            class C
+            {
+                int M(ProtectedString ps)
+                {
+            #pragma warning disable CS0618
+                    return ps.Access((char[] p) => p.Length);
+            #pragma warning restore CS0618
+                }
+            }
+            """);
+        AssertDiagnosticIds(d /* no expected diagnostics */);
+    }
+
+    [Test]
+    public async Task No_TPS002_when_nested_local_function_returns_array_param_inside_Access()
+    {
+        // A return from a nested local function stays inside the Access
+        // window — the array never leaves the callback.
+        var d = await RunAsync("""
+            using TopSecret;
+            class C
+            {
+                int M(ProtectedString ps)
+                {
+            #pragma warning disable CS0618
+                    return ps.Access((char[] p) =>
+                    {
+                        char[] Same(char[] x) { return x; }
+                        return Same(p).Length;
+                    });
+            #pragma warning restore CS0618
+                }
+            }
+            """);
+        AssertDiagnosticIds(d /* no expected diagnostics */);
+    }
+
+    [Test]
+    public async Task TPS002_fires_on_List_Add_of_array_param()
+    {
+        // Storing the array in a collection that outlives the callback
+        // retains the reference exactly like `field = plain` does.
+        var d = await RunAsync("""
+            using System.Collections.Generic;
+            using TopSecret;
+            class C
+            {
+                void M(ProtectedString ps)
+                {
+                    var list = new List<char[]>();
+            #pragma warning disable CS0618
+                    ps.Access((char[] plain) =>
+                    {
+                        list.Add(plain);
+                    });
+            #pragma warning restore CS0618
+                    System.GC.KeepAlive(list);
+                }
+            }
+            """);
+        AssertDiagnosticIds(d, "TPS002");
+    }
+
+    [Test]
+    public async Task TPS002_fires_on_array_slot_store_of_array_param()
+    {
+        var d = await RunAsync("""
+            using TopSecret;
+            class C
+            {
+                private readonly char[]?[] _slots = new char[]?[1];
+                void M(ProtectedString ps)
+                {
+            #pragma warning disable CS0618
+                    ps.Access((char[] plain) =>
+                    {
+                        _slots[0] = plain;
+                    });
+            #pragma warning restore CS0618
+                }
+            }
+            """);
+        AssertDiagnosticIds(d, "TPS002");
+    }
+
+    [Test]
+    public async Task No_TPS002_when_List_Add_stores_unrelated_value()
+    {
+        var d = await RunAsync("""
+            using System.Collections.Generic;
+            using TopSecret;
+            class C
+            {
+                void M(ProtectedString ps)
+                {
+                    var lengths = new List<int>();
+            #pragma warning disable CS0618
+                    ps.Access((char[] plain) =>
+                    {
+                        lengths.Add(plain.Length);
+                    });
+            #pragma warning restore CS0618
+                    System.GC.KeepAlive(lengths);
+                }
+            }
+            """);
+        AssertDiagnosticIds(d /* no expected diagnostics */);
+    }
+
+    // ---- Lambda wrapped in a cast / parentheses -------------------------
+
+    [Test]
+    public async Task TPS001_fires_when_lambda_is_cast_to_delegate_type()
+    {
+        // `ps.Access((ReadOnlySpanAction<char>)(p => ...))` is still a
+        // lambda passed to Access — the cast must not hide it.
+        var d = await RunAsync("""
+            using System;
+            using TopSecret;
+            class C
+            {
+                void M(ProtectedString ps)
+                {
+                    ps.Access((ReadOnlySpanAction<char>)(p =>
+                    {
+                        var leak = new string(p);
+                        System.GC.KeepAlive(leak);
+                    }));
+                }
+            }
+            """);
+        AssertDiagnosticIds(d, "TPS001");
+    }
+
+    [Test]
+    public async Task TPS002_fires_when_parenthesised_lambda_captures_array_param()
+    {
+        var d = await RunAsync("""
+            using System;
+            using TopSecret;
+            class C
+            {
+                private char[]? _leaked;
+                void M(ProtectedString ps)
+                {
+            #pragma warning disable CS0618
+                    ps.Access(((Action<char[]>)((plain) =>
+                    {
+                        _leaked = plain;
+                    })));
+            #pragma warning restore CS0618
+                }
+            }
+            """);
+        AssertDiagnosticIds(d, "TPS002");
+    }
+
+    // ---- Nested lambdas: resolve captures against the Access lambda -----
+
+    [Test]
+    public async Task No_TPS002_when_local_declared_in_Access_lambda_is_assigned_in_nested_lambda()
+    {
+        // The local lives in the Access lambda's frame; assigning it from
+        // a nested lambda does not make it outlive the callback.
+        var d = await RunAsync("""
+            using System;
+            using TopSecret;
+            class C
+            {
+                void M(ProtectedString ps)
+                {
+            #pragma warning disable CS0618
+                    ps.Access((char[] plain) =>
+                    {
+                        char[]? local = null;
+                        Action assign = () => { local = plain; };
+                        assign();
+                        System.GC.KeepAlive(local);
+                    });
+            #pragma warning restore CS0618
+                }
+            }
+            """);
+        AssertDiagnosticIds(d /* no expected diagnostics */);
+    }
+
+    [Test]
+    public async Task TPS002_fires_when_captured_local_is_assigned_in_nested_lambda()
+    {
+        // Same shape, but the local is declared outside Access — the
+        // nesting must not hide the escape.
+        var d = await RunAsync("""
+            using System;
+            using TopSecret;
+            class C
+            {
+                void M(ProtectedString ps)
+                {
+                    char[]? leaked = null;
+            #pragma warning disable CS0618
+                    ps.Access((char[] plain) =>
+                    {
+                        Action assign = () => { leaked = plain; };
+                        assign();
+                    });
+            #pragma warning restore CS0618
+                    System.GC.KeepAlive(leaked);
+                }
+            }
+            """);
+        AssertDiagnosticIds(d, "TPS002");
+    }
+
+    // ---- Negative controls: legitimate in-place operations --------------
+
+    [Test]
+    public async Task No_diagnostic_for_IndexOf_and_FixedTimeEquals_over_span_param()
+    {
+        var d = await RunAsync("""
+            using System;
+            using System.Runtime.InteropServices;
+            using System.Security.Cryptography;
+            using TopSecret;
+            class C
+            {
+                bool M(ProtectedString ps, byte[] expected)
+                {
+                    return ps.Access((ReadOnlySpan<char> plain) =>
+                    {
+                        int at = plain.IndexOf(':');
+                        bool same = CryptographicOperations.FixedTimeEquals(MemoryMarshal.AsBytes(plain), expected);
+                        return at >= 0 && same && plain.Length > 0;
+                    });
+                }
+            }
+            """);
+        AssertDiagnosticIds(d /* no expected diagnostics */);
+    }
+
+    [Test]
+    public async Task No_diagnostic_for_CopyTo_into_stack_buffer_and_ProtectedString_ctor()
+    {
+        var d = await RunAsync("""
+            using System;
+            using TopSecret;
+            class C
+            {
+                ProtectedString M(ProtectedString ps)
+                {
+                    return ps.Access((ReadOnlySpan<char> plain) =>
+                    {
+                        Span<char> destination = stackalloc char[plain.Length];
+                        plain.CopyTo(destination);
+                        plain[..2].CopyTo(destination);
+                        return new ProtectedString(plain);
+                    });
+                }
+            }
+            """);
+        AssertDiagnosticIds(d /* no expected diagnostics */);
+    }
 }
