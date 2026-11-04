@@ -82,9 +82,11 @@ public class ProtectorEdgePathCoverageTests
             public override KeyAccessor UnwrapKey() => KeyAccessor.Persistent(_master);
         }
 
-        // Exercises TtlCachingKeyAtRestProtector.cs lines 149-150: the !ok cleanup
-        // in Refresh when arming the wipe timer throws after the fresh buffer was
-        // already populated.
+        // Exercises the !ok cleanup in TtlCachingKeyAtRestProtector.Refresh when
+        // arming the wipe timer throws after the fresh buffer was already
+        // populated — and that the failed refresh leaves the cache EMPTY (the
+        // next call retries the inner protector) rather than pointing at the
+        // wiped buffer.
         [Test]
         public void Refresh_wipes_and_unlocks_fresh_buffer_when_timer_arming_throws()
         {
@@ -101,6 +103,9 @@ public class ProtectorEdgePathCoverageTests
             {
                 Assert.Throws<ArgumentOutOfRangeException>(() => cache.UnwrapKey(),
                     "arming the wipe timer with a negative due time must surface, not be swallowed");
+                Assert.Throws<ArgumentOutOfRangeException>(() => cache.UnwrapKey(),
+                    "a failed refresh must leave the cache empty, so the next call refreshes (and fails) again " +
+                    "instead of handing out the wiped buffer");
             }
             finally
             {
@@ -167,13 +172,13 @@ public class ProtectorEdgePathCoverageTests
                 "the mid-wrap fault should surface from the XOR loop");
         }
 
-        // Exercises HkdfWrapProtector.cs lines 132-133: the !ok cleanup in UnwrapKey
-        // when unwrapping faults after the ephemeral buffer was allocated and locked.
+        // Exercises HkdfWrapProtector.UnwrapCore's fault path: the XOR loop
+        // throws before the locked ephemeral is allocated, and the stack
+        // plaintext is wiped by the enclosing finally.
         [Test]
         public void UnwrapKey_cleans_up_ephemeral_buffer_when_unwrap_faults_mid_flight()
         {
-            // A truncated wrapped blob makes the XOR loop fault at index 15,
-            // driving the !ok finally (zero + unlock of the ephemeral buffer).
+            // A truncated wrapped blob makes the XOR loop fault at index 15.
             // Buffers are pinned to honour MemoryLocker's pinning precondition.
             var wrapKey = GC.AllocateArray<byte>(32, pinned: true);
             var truncatedWrapped = GC.AllocateArray<byte>(15, pinned: true);
@@ -194,8 +199,8 @@ public class ProtectorEdgePathCoverageTests
             }
         }
 
-        // Exercises HkdfWrapProtector.cs lines 154-155: the finalizer safety net
-        // that disposes (zeros + unlocks) an undisposed protector.
+        // Exercises the DisposableKeyAtRestProtector finalizer safety net that
+        // disposes (zeros + unlocks) an undisposed protector.
         [Test]
         public void Finalizer_disposes_undisposed_protector()
         {

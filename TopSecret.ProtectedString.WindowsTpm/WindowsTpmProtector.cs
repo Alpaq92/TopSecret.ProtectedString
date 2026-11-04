@@ -1,5 +1,4 @@
 using System.Runtime.InteropServices;
-using System.Runtime.Versioning;
 using System.Security.Cryptography;
 using System.Text;
 using TopSecret;
@@ -17,8 +16,8 @@ namespace TopSecret.WindowsTpm;
 /// generated inside the TPM via the CNG <c>NCrypt</c> API and the
 /// <i>Microsoft Platform Crypto Provider</i>. The RSA private key never
 /// leaves the TPM; the wrapped master is held in process memory as
-/// OAEP-SHA256 ciphertext, and every <see cref="UnwrapKey"/> call performs
-/// a TPM round-trip via <c>NCryptDecrypt</c>.
+/// OAEP-SHA256 ciphertext, and every <see cref="KeyAtRestProtector.UnwrapKey"/>
+/// call performs a TPM round-trip via <c>NCryptDecrypt</c>.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -38,23 +37,22 @@ namespace TopSecret.WindowsTpm;
 /// <see cref="WindowsTpmProtector"/> instance is disposed (typically on
 /// process exit, or at the end of a <see cref="ProtectedString.RotateProcessKey"/>
 /// pass), <c>NCryptFreeObject</c> on the key handle releases the TPM's
-/// reference and the keypair becomes unreachable. A finalizer covers the
-/// case where a protector becomes unreachable without explicit
-/// <see cref="Dispose"/> — for instance, an old protector orphaned by
-/// process-key rotation under <see cref="ProcessKeyRotation.Periodic"/>.
-/// Without the finalizer, repeated rotations would exhaust TPM transient
-/// slots (commodity TPMs hold ≤3, enterprise TPMs 4–8) and subsequent
-/// <c>NCryptCreatePersistedKey</c> calls would fail with
-/// <c>TPM_RC_RESOURCES (0x80284001)</c>.
+/// reference and the keypair becomes unreachable. The base-class finalizer
+/// covers the case where a protector becomes unreachable without explicit
+/// <see cref="DisposableKeyAtRestProtector.Dispose"/> — for instance, an
+/// old protector orphaned by process-key rotation under
+/// <see cref="ProcessKeyRotation.Periodic"/>. Without it, repeated
+/// rotations would exhaust TPM transient slots (commodity TPMs hold ≤3,
+/// enterprise TPMs 4–8) and subsequent <c>NCryptCreatePersistedKey</c>
+/// calls would fail with <c>TPM_RC_RESOURCES (0x80284001)</c>.
 /// </para>
 /// </remarks>
-internal sealed class WindowsTpmProtector : KeyAtRestProtector, IDisposable
+internal sealed class WindowsTpmProtector : DisposableKeyAtRestProtector
 {
     private const string PlatformProvider = "Microsoft Platform Crypto Provider";
     private const string AlgorithmRsa = "RSA";
     private const string OaepHashAlgorithm = "SHA256";
     private const int RsaKeyBits = 2048;
-    private const int MasterKeySize = 32;
 
     private const uint NCRYPT_PAD_OAEP_FLAG = 0x4;
     private const string NcryptLengthProperty = "Length";
@@ -81,7 +79,6 @@ internal sealed class WindowsTpmProtector : KeyAtRestProtector, IDisposable
     private nint _hProvider;
     private nint _hKey;
     private readonly byte[] _wrappedBlob;
-    private bool _disposed;
 
     /// <summary>
     /// Reports whether the Microsoft Platform Crypto Provider can be opened
@@ -113,17 +110,8 @@ internal sealed class WindowsTpmProtector : KeyAtRestProtector, IDisposable
     /// </summary>
     public static KeyAtRestProtector? TryCreate(byte[] master)
     {
-        if (master.Length != MasterKeySize) return null;
         if (!OperatingSystem.IsWindows()) return null;
-
-        try
-        {
-            return CreateOrThrow(master);
-        }
-        catch
-        {
-            return null;
-        }
+        return TryCreate(master, CreateOrThrow);
     }
 
     private static WindowsTpmProtector CreateOrThrow(byte[] master)
@@ -206,10 +194,10 @@ internal sealed class WindowsTpmProtector : KeyAtRestProtector, IDisposable
         _wrappedBlob = wrappedBlob;
     }
 
-    public override KeyAccessor UnwrapKey()
+    protected override KeyAccessor UnwrapCore()
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
-
+        // The base's GC.KeepAlive(this) keeps _hKey alive through the TPM
+        // round-trip, so the finalizer cannot NCryptFreeObject it mid-decrypt.
         var paddingInfo = new BcryptOaepPaddingInfo
         {
             pszAlgId = AlgIdPointer(),
@@ -221,59 +209,32 @@ internal sealed class WindowsTpmProtector : KeyAtRestProtector, IDisposable
             null, 0, out int requiredLen, NCRYPT_PAD_OAEP_FLAG);
         ThrowIfNCryptFailed(status, "NCryptDecrypt size probe failed.");
 
-        // Allocate the destination as a pinned + locked buffer up front.
-        // It is sized to NCrypt's reported max, then trimmed if NCrypt
-        // returns less.
+        // NCrypt decrypts into a staging buffer sized to its reported
+        // maximum; it is pinned + locked so the plaintext never lands on an
+        // unlocked page, then trimmed into the right-sized ephemeral and
+        // wiped regardless of outcome.
         var staging = ProtectedString.AllocatePinnedBytes(
             requiredLen, excludeFromDumps: true, lockContext: "memory locking unwrapped key");
-
-        bool ok = false;
-        byte[] result = staging;
         try
         {
             status = NCryptDecrypt(_hKey, _wrappedBlob, _wrappedBlob.Length, ref paddingInfo,
                 staging, staging.Length, out int actualLen, NCRYPT_PAD_OAEP_FLAG);
             ThrowIfNCryptFailed(status, "NCryptDecrypt failed.");
 
-            if (actualLen != staging.Length)
-            {
-                // Promote the actual plaintext into a right-sized pinned/locked
-                // buffer and wipe the oversized staging buffer.
-                var sized = ProtectedString.AllocatePinnedBytes(
-                    actualLen, excludeFromDumps: true, lockContext: "memory locking unwrapped key");
-                Array.Copy(staging, sized, actualLen);
-                CryptographicOperations.ZeroMemory(staging);
-                MemoryLocker.TryUnlock(staging);
-                result = sized;
-            }
-
-            ok = true;
-            return KeyAccessor.Ephemeral(result);
+            return EphemeralFrom(staging.AsSpan(0, actualLen));
         }
         finally
         {
-            if (!ok)
-            {
-                CryptographicOperations.ZeroMemory(staging);
-                MemoryLocker.TryUnlock(staging);
-            }
+            CryptographicOperations.ZeroMemory(staging);
+            MemoryLocker.TryUnlock(staging);
         }
     }
 
-    public void Dispose()
+    protected override void ReleaseResources()
     {
-        if (_disposed) return;
-        _disposed = true;
         CryptographicOperations.ZeroMemory(_wrappedBlob);
         if (_hKey != 0) { NCryptFreeObject(_hKey); _hKey = 0; }
         if (_hProvider != 0) { NCryptFreeObject(_hProvider); _hProvider = 0; }
-        GC.SuppressFinalize(this);
-    }
-
-    ~WindowsTpmProtector()
-    {
-        try { Dispose(); }
-        catch { /* finalizer must not throw */ }
     }
 
     private static nint AlgIdPointer() =>

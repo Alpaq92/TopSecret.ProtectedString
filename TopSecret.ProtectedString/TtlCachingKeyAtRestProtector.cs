@@ -39,8 +39,9 @@ namespace TopSecret;
 /// issue.
 /// </para>
 /// <para>
-/// <b>Lifetime contract — no finalizer.</b> Unlike the other protectors,
-/// this decorator deliberately has no finalizer. The wipe-timer it creates
+/// <b>Lifetime contract — no finalizer.</b> Unlike the other protectors
+/// (which derive from <see cref="DisposableKeyAtRestProtector"/>), this
+/// decorator deliberately has no finalizer. The wipe-timer it creates
 /// in <see cref="UnwrapKey"/> captures <c>this</c> as its
 /// <see cref="System.Threading.Timer"/> state, and the runtime's timer
 /// queue holds the timer strongly. Once the timer is armed, the decorator
@@ -53,9 +54,22 @@ namespace TopSecret;
 /// and composition-root teardown. If you ever construct one outside the
 /// factory, you are responsible for calling <see cref="Dispose"/>.
 /// </para>
+/// <para>
+/// <b>Timer horizon.</b> <see cref="System.Threading.Timer"/> rejects due
+/// times above <see cref="MaxTimerDueMs"/> (≈49.7 days). A longer TTL is
+/// honoured logically — the expiry tick is computed from the full TTL —
+/// while the wipe timer is armed in <see cref="MaxTimerDueMs"/> hops and
+/// simply re-arms when it fires early (see <see cref="TryWipeIfExpired"/>).
+/// </para>
 /// </remarks>
 internal sealed class TtlCachingKeyAtRestProtector : KeyAtRestProtector, IDisposable
 {
+    /// <summary>
+    /// Largest due time <see cref="Timer.Change(TimeSpan, TimeSpan)"/> accepts:
+    /// <c>uint.MaxValue - 1</c> milliseconds.
+    /// </summary>
+    internal const long MaxTimerDueMs = 4294967294L;
+
     private readonly KeyAtRestProtector _inner;
     private readonly TimeSpan _ttl;
     private readonly object _cacheLock = new();
@@ -93,26 +107,7 @@ internal sealed class TtlCachingKeyAtRestProtector : KeyAtRestProtector, IDispos
             // the TTL expires in exactly that window — a silent
             // encrypt-under-wrong-key data-loss path. Refresh already
             // allocates under this lock, so the cost profile is unchanged.
-            var snapshot = _cachedKey!;
-            int snapshotLength = snapshot.Length;
-            var ephemeral = ProtectedString.AllocatePinnedBytes(
-                snapshotLength, excludeFromDumps: true, lockContext: "memory locking unwrapped key");
-
-            bool ok = false;
-            try
-            {
-                Array.Copy(snapshot, ephemeral, snapshotLength);
-                ok = true;
-                return KeyAccessor.Ephemeral(ephemeral);
-            }
-            finally
-            {
-                if (!ok && snapshotLength > 0)
-                {
-                    CryptographicOperations.ZeroMemory(ephemeral);
-                    MemoryLocker.TryUnlock(ephemeral);
-                }
-            }
+            return DisposableKeyAtRestProtector.EphemeralFrom(_cachedKey!);
         }
     }
 
@@ -130,13 +125,22 @@ internal sealed class TtlCachingKeyAtRestProtector : KeyAtRestProtector, IDispos
         try
         {
             Array.Copy(unwrapped.Key, fresh, len);
-            _cachedKey = fresh;
-            _expiryTickMs = nowMs + (long)_ttl.TotalMilliseconds;
 
+            // Arm the timer BEFORE publishing the new cache entry. Timer.Change
+            // can throw (a due time outside [-1, MaxTimerDueMs] ms); if it
+            // does, the finally below wipes `fresh` and _cachedKey is still
+            // null from WipeCachedLocked above — so the next UnwrapKey
+            // refreshes again instead of handing out the wiped (all-zero)
+            // buffer under a far-future expiry.
+            long expiry = nowMs + (long)_ttl.TotalMilliseconds;
             _wipeTimer ??= new Timer(static state => ((TtlCachingKeyAtRestProtector)state!).TryWipeIfExpired(),
                 this, Timeout.Infinite, Timeout.Infinite);
-            _wipeTimer.Change(_ttl, Timeout.InfiniteTimeSpan);
+            ArmWipeTimer((long)_ttl.TotalMilliseconds);
 
+            // Publish last: both fields flip together under _cacheLock, after
+            // every throwing operation has completed.
+            _cachedKey = fresh;
+            _expiryTickMs = expiry;
             ok = true;
         }
         finally
@@ -147,6 +151,20 @@ internal sealed class TtlCachingKeyAtRestProtector : KeyAtRestProtector, IDispos
                 MemoryLocker.TryUnlock(fresh);
             }
         }
+    }
+
+    /// <summary>
+    /// Arms the wipe timer for <paramref name="dueMs"/> clamped to the
+    /// <see cref="Timer"/> maximum. Negative values are passed through so a
+    /// genuinely invalid TTL still surfaces as
+    /// <see cref="ArgumentOutOfRangeException"/> rather than being masked.
+    /// Caller holds <c>_cacheLock</c> and has created <c>_wipeTimer</c>.
+    /// </summary>
+    private void ArmWipeTimer(long dueMs)
+    {
+        _wipeTimer!.Change(
+            TimeSpan.FromMilliseconds(Math.Min(dueMs, MaxTimerDueMs)),
+            Timeout.InfiniteTimeSpan);
     }
 
     private void TryWipeIfExpired()
@@ -161,9 +179,11 @@ internal sealed class TtlCachingKeyAtRestProtector : KeyAtRestProtector, IDispos
             }
             else
             {
-                // Another UnwrapKey call refreshed the cache after this
-                // timer was scheduled; reschedule for the new expiry.
-                _wipeTimer?.Change(TimeSpan.FromMilliseconds(_expiryTickMs - nowMs), Timeout.InfiniteTimeSpan);
+                // Either another UnwrapKey call refreshed the cache after this
+                // timer was scheduled, or the TTL exceeds the Timer horizon
+                // and this is an intermediate hop; reschedule for the (clamped)
+                // remaining time.
+                ArmWipeTimer(_expiryTickMs - nowMs);
             }
         }
     }

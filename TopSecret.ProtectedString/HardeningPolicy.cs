@@ -1,5 +1,3 @@
-using System.Diagnostics;
-
 namespace TopSecret;
 
 /// <summary>
@@ -81,10 +79,9 @@ internal static class HardeningPolicy
                 "to proceed without this protection.");
         }
 
-        if (behavior == MemoryLockingFailureBehavior.LogWarning &&
-            Interlocked.CompareExchange(ref s_warningLogged, 1, 0) == 0)
+        if (behavior == MemoryLockingFailureBehavior.LogWarning)
         {
-            Trace.TraceWarning(
+            WarnOnce.Trace(ref s_warningLogged,
                 $"ProtectedString: {primitive} failed or is unavailable on this platform. " +
                 "Other hardening defences (AES-GCM, AAD binding, pinned wipes, constant-time compare) still hold. " +
                 $"Set {nameof(ProtectedStringOptions)}.{nameof(ProtectedStringOptions.MemoryLockingFailureBehavior)} " +
