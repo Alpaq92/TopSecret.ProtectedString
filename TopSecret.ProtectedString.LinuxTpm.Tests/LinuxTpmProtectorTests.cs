@@ -169,6 +169,141 @@ public class LinuxTpmProtectorTests
     }
 
     /// <summary>
+    /// Concurrency regression against the swtpm simulator: a TSS.MSR
+    /// <see cref="Tpm2"/> is a single command/response pipe, so
+    /// <c>LinuxTpmProtector.UnwrapKey</c> must serialise <c>RSA_Decrypt</c>
+    /// on its private gate. Drives parallel unwraps through a decorating
+    /// <see cref="Tpm2Device"/> that counts in-flight
+    /// <see cref="Tpm2Device.DispatchCommand"/> calls — the gate holds if
+    /// that count never exceeds one and every unwrap round-trips the master.
+    /// Gated like <see cref="Round_trip_against_swtpm_simulator"/>: it runs
+    /// only where swtpm is listening (the ubuntu CI leg), because a fake
+    /// <see cref="Tpm2Device"/> would have to answer CreatePrimary / Create /
+    /// Load / RSA_Encrypt / RSA_Decrypt with correctly framed TPM2 responses.
+    /// </summary>
+    [Test]
+    public void Parallel_unwraps_against_swtpm_never_overlap_on_the_command_pipe()
+    {
+        if (!IsSwtpmListening())
+        {
+            Assert.Ignore(
+                $"No swtpm simulator listening on {SwtpmHost}:{SwtpmCommandPort}. " +
+                "Start swtpm in socket mode to exercise this test locally — see " +
+                "ci.yml for the GitHub Actions setup.");
+            return;
+        }
+
+        var input = RandomNumberGenerator.GetBytes(32);
+        byte[] expected = input.ToArray();
+
+        var inner = new TcpTpmDevice(SwtpmHost, SwtpmCommandPort, stopTpm: false, linuxTrm: true);
+        inner.Connect();
+        var counting = new ConcurrencyCountingDevice(inner);
+
+        var protector = LinuxTpmProtector.TryCreateWithDevice(input, counting);
+        Assert.That(protector, Is.Not.Null,
+            "TryCreateWithDevice returned null against a connected swtpm simulator.");
+
+        try
+        {
+            counting.ResetMax();
+            const int threads = 8, iterations = 10;
+            using var start = new ManualResetEventSlim(false);
+            var failures = new System.Collections.Concurrent.ConcurrentBag<string>();
+            var workers = Enumerable.Range(0, threads).Select(t => new Thread(() =>
+            {
+                start.Wait();
+                for (int i = 0; i < iterations; i++)
+                {
+                    using var key = protector!.UnwrapKey();
+                    if (!key.Key.AsSpan().SequenceEqual(expected))
+                    {
+                        failures.Add($"thread {t} iteration {i}: unwrapped key did not match the master");
+                    }
+                }
+            })).ToArray();
+            foreach (var w in workers) w.Start();
+            start.Set();
+            foreach (var w in workers) w.Join();
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(failures, Is.Empty);
+                Assert.That(counting.MaxInFlight, Is.EqualTo(1),
+                    "RSA_Decrypt commands must be serialised on the protector's gate — " +
+                    "Tpm2 is a single command/response pipe");
+                Assert.That(counting.Dispatched, Is.GreaterThanOrEqualTo(threads * iterations),
+                    "every unwrap should have reached the device");
+            });
+        }
+        finally
+        {
+            (protector as IDisposable)?.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Decorating <see cref="Tpm2Device"/> that forwards everything to the
+    /// wrapped device and records the maximum number of concurrently
+    /// in-flight <see cref="DispatchCommand"/> calls.
+    /// </summary>
+    private sealed class ConcurrencyCountingDevice : Tpm2Device
+    {
+        private readonly Tpm2Device _inner;
+        private int _inFlight;
+        private int _maxInFlight;
+        private int _dispatched;
+
+        public ConcurrencyCountingDevice(Tpm2Device inner) => _inner = inner;
+
+        public int MaxInFlight => Volatile.Read(ref _maxInFlight);
+        public int Dispatched => Volatile.Read(ref _dispatched);
+
+        public void ResetMax()
+        {
+            Volatile.Write(ref _maxInFlight, 0);
+            Volatile.Write(ref _dispatched, 0);
+        }
+
+        public override void DispatchCommand(CommandModifier mod, byte[] cmdBuf, out byte[] respBuf)
+        {
+            int now = Interlocked.Increment(ref _inFlight);
+            try
+            {
+                int seen;
+                do
+                {
+                    seen = Volatile.Read(ref _maxInFlight);
+                    if (now <= seen) break;
+                } while (Interlocked.CompareExchange(ref _maxInFlight, now, seen) != seen);
+
+                Interlocked.Increment(ref _dispatched);
+                // Widen the overlap window so an unguarded caller would be
+                // caught deterministically rather than by luck.
+                Thread.Sleep(1);
+                _inner.DispatchCommand(mod, cmdBuf, out respBuf);
+            }
+            finally
+            {
+                Interlocked.Decrement(ref _inFlight);
+            }
+        }
+
+        public override void Connect() => _inner.Connect();
+        // Tpm2Device.Dispose() is non-virtual and routes through Close(), so
+        // forwarding Close is what releases the wrapped device's sockets.
+        public override void Close() => _inner.Dispose();
+        public override bool PlatformAvailable() => _inner.PlatformAvailable();
+        public override bool HasRM() => _inner.HasRM();
+        public override bool UsesTbs() => _inner.UsesTbs();
+        public override bool PowerCtlAvailable() => _inner.PowerCtlAvailable();
+        public override bool LocalityCtlAvailable() => _inner.LocalityCtlAvailable();
+        public override bool NvCtlAvailable() => _inner.NvCtlAvailable();
+        public override bool ImplementsPhysicalPresence() => _inner.ImplementsPhysicalPresence();
+        public override bool ImplementsCancel() => _inner.ImplementsCancel();
+    }
+
+    /// <summary>
     /// Best-effort liveness probe: try to TCP-connect to the swtpm command
     /// port. If the connect succeeds within a short timeout, the simulator
     /// is up. This avoids a multi-second timeout when no swtpm is running.

@@ -14,7 +14,7 @@ namespace TopSecret.LinuxTpm;
 /// <para>
 /// On non-Linux hosts the module initializer still runs, but
 /// <see cref="LinuxTpmProtector.IsAvailable"/> returns <see langword="false"/>
-/// and <see cref="LinuxTpmProtector.TryCreate"/> returns
+/// and <see cref="LinuxTpmProtector.TryCreate(byte[])"/> returns
 /// <see langword="null"/>, so the registration is a no-op in practice. This
 /// keeps the package safely referenceable from cross-platform projects.
 /// </para>
@@ -58,17 +58,14 @@ public static class LinuxTpmRegistration
     /// are no-ops. Safe to call from any platform; the factory delegate
     /// returns <see langword="null"/> on non-Linux hosts.
     /// </summary>
-    public static void Register()
-    {
-        if (Interlocked.CompareExchange(ref s_registered, 1, 0) != 0) return;
-
-        KeyAtRestProtectorFactory.RegisterHardwareBacked(
+    public static void Register() =>
+        HardwareProviderRegistration.RegisterOnce(
+            ref s_registered,
             factory: LinuxTpmProtector.TryCreate,
-            availabilityProbe: LinuxTpmProtector.IsAvailable,
+            probe: LinuxTpmProtector.IsAvailable,
             // TPM 2.0 keeps generated keys in transient slots (≤3 on
             // commodity TPMs). Periodic process-key rotation orphans the
             // old protectors; without this flag the main package can't
             // tell the operator that they're about to hit TPM_RC_RESOURCES.
             transientSlotConstrained: true);
-    }
 }

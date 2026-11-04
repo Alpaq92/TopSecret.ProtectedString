@@ -190,9 +190,23 @@ public class RotationTimerAndRareBranchCoverageTests
 
     private static bool IsProtectorDisposed(KeyAtRestProtector protector)
     {
-        var field = protector.GetType().GetField("_disposed", BindingFlags.Instance | BindingFlags.NonPublic)
-            ?? throw new InvalidOperationException($"_disposed not found on {protector.GetType().Name}");
-        return (bool)field.GetValue(protector)!;
+        // The flag lives on DisposableKeyAtRestProtector (an Interlocked int)
+        // for every resource-owning protector, and on TtlCachingKeyAtRestProtector
+        // (a bool) which deliberately does not derive from it. Private fields of
+        // a base type are not returned by GetField on the derived type, so walk
+        // the hierarchy.
+        for (var t = protector.GetType(); t is not null; t = t.BaseType)
+        {
+            var field = t.GetField("_disposed", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.DeclaredOnly);
+            if (field is null) continue;
+            return field.GetValue(protector) switch
+            {
+                bool b => b,
+                int i => i != 0,
+                var other => throw new InvalidOperationException($"unexpected _disposed type {other?.GetType().Name}"),
+            };
+        }
+        throw new InvalidOperationException($"_disposed not found on {protector.GetType().Name} or its bases");
     }
 
     // ---- EnsurePeriodicRotationTimer + timer callback ---------------------

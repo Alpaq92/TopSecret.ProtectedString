@@ -1,5 +1,4 @@
 using System.ComponentModel;
-using System.Diagnostics;
 using System.Security.Cryptography;
 
 namespace TopSecret;
@@ -9,25 +8,37 @@ namespace TopSecret;
 /// </summary>
 /// <remarks>
 /// <para>
-/// Two shapes ship in the box:
+/// Three shapes ship in the box:
 /// </para>
 /// <list type="bullet">
 ///   <item><c>NoopKeyAtRestProtector</c> — the master key is held plaintext in
 ///   a pinned, locked, dump-excluded byte array; <see cref="UnwrapKey"/> hands
 ///   the same array out without copying or zeroing.</item>
+///   <item><c>AesGcmWrapProtector</c> (universal obscurity tier, with
+///   <c>HkdfWrapProtector</c> as its fallback) and
+///   <c>PageGuardedKeyProtector</c> — software wraps that keep the master
+///   AEAD-wrapped under a per-protector random key, or on a no-access page,
+///   between operations.</item>
 ///   <item><see cref="AppleSecKeyProtector"/> /
 ///   <c>AndroidKeystoreProtector</c> (the latter compiled only into the
 ///   <c>net10.0-android</c> TFM) — the master is wrapped at init with a
 ///   hardware-resident key (Apple Secure Enclave EC P-256 ECIES, Android
-///   Keystore AES-GCM); the unwrap on each call returns a freshly allocated,
-///   pinned, locked, dump-excluded buffer that <see cref="KeyAccessor.Dispose"/>
-///   zeros and unlocks.</item>
+///   Keystore AES-GCM).</item>
 /// </list>
+/// <para>
+/// Every non-no-op implementation returns a freshly allocated, pinned,
+/// locked, dump-excluded buffer from <see cref="UnwrapKey"/> that
+/// <see cref="KeyAccessor.Dispose"/> zeros and unlocks. The resource-owning
+/// implementations all derive from the internal
+/// <c>DisposableKeyAtRestProtector</c> base, which centralises the disposed
+/// guard, finalizer safety net and ephemeral-buffer tail.
+/// </para>
 /// <para>
 /// Additional providers can be registered through
 /// <see cref="KeyAtRestProtectorFactory.RegisterHardwareBacked"/>. The
-/// <c>TopSecret.ProtectedString.WindowsTpm</c> NuGet uses this mechanism to
-/// register a TPM 2.0 protector via <c>ModuleInitializer</c>.
+/// <c>TopSecret.ProtectedString.WindowsTpm</c> and
+/// <c>TopSecret.ProtectedString.LinuxTpm</c> NuGets use this mechanism to
+/// register TPM 2.0 protectors via <c>ModuleInitializer</c>.
 /// </para>
 /// <para>
 /// Selected by <see cref="ProtectedStringOptions.KeyAtRestProtection"/> via
@@ -100,21 +111,23 @@ public sealed class KeyAccessor : IDisposable
 /// </summary>
 /// <remarks>
 /// <para>
-/// Implements <see cref="IDisposable"/> so process-key rotation can release
-/// the mlocked / VirtualLocked master when the protector is replaced. The
-/// finalizer is the safety net for the rotation-orphans-old-protector path
-/// (see <see cref="ProtectedString.RotateProcessKey"/>) — without it, every
+/// Disposable (via <see cref="DisposableKeyAtRestProtector"/>) so
+/// process-key rotation can release the mlocked / VirtualLocked master when
+/// the protector is replaced. The base-class finalizer is the safety net for
+/// the rotation-orphans-old-protector path (see
+/// <see cref="ProtectedString.RotateProcessKey"/>) — without it, every
 /// rotated-out master would stay locked until process exit, eating the
 /// <c>RLIMIT_MEMLOCK</c> budget on libc targets.
 /// </para>
 /// <para>
-/// <b>Disposal contract.</b> <see cref="UnwrapKey"/> hands back the master
-/// via <see cref="KeyAccessor.Persistent(byte[])"/> — i.e. the caller's
-/// <see cref="KeyAccessor.Key"/> aliases the protector's <c>_master</c>
-/// without copying. <see cref="Dispose"/> zeros that array in place, which
-/// invalidates every outstanding <see cref="KeyAccessor"/> that came from
-/// this protector. Production code never reaches this from a live code
-/// path: Dispose fires via <see cref="ProtectorLifetime"/> only after a
+/// <b>Disposal contract.</b> <see cref="KeyAtRestProtector.UnwrapKey"/>
+/// hands back the master via <see cref="KeyAccessor.Persistent(byte[])"/> —
+/// i.e. the caller's <see cref="KeyAccessor.Key"/> aliases the protector's
+/// <c>_master</c> without copying.
+/// <see cref="DisposableKeyAtRestProtector.Dispose"/> zeros that array in
+/// place, which invalidates every outstanding <see cref="KeyAccessor"/> that
+/// came from this protector. Production code never reaches this from a live
+/// code path: Dispose fires via <see cref="ProtectorLifetime"/> only after a
 /// rotation superseded this protector <i>and</i> the last holder
 /// (<see cref="ProtectedString"/> / <c>ProtectedBlob</c> instance) released
 /// it — at which point no operation can be in flight — or from the GC
@@ -123,10 +136,9 @@ public sealed class KeyAccessor : IDisposable
 /// after every accessor it issued has been disposed.
 /// </para>
 /// </remarks>
-internal sealed class NoopKeyAtRestProtector : KeyAtRestProtector, IDisposable
+internal sealed class NoopKeyAtRestProtector : DisposableKeyAtRestProtector
 {
     private readonly byte[] _master;
-    private bool _disposed;
 
     public NoopKeyAtRestProtector(byte[] master)
     {
@@ -138,31 +150,15 @@ internal sealed class NoopKeyAtRestProtector : KeyAtRestProtector, IDisposable
         HardeningPolicy.LockAndExclude(master, "memory locking the master AES key");
     }
 
-    public override KeyAccessor UnwrapKey()
-    {
-        // Load-bearing since ProtectorLifetime made disposal deterministic:
-        // without this guard a lifetime-accounting bug would hand back the
-        // zeroed master and encrypt silently under an all-zero key instead
-        // of failing loudly.
-        ObjectDisposedException.ThrowIf(_disposed, this);
-        return KeyAccessor.Persistent(_master);
-    }
+    protected override KeyAccessor UnwrapCore() => KeyAccessor.Persistent(_master);
 
-    public void Dispose()
+    protected override void ReleaseResources()
     {
-        if (_disposed) return;
-        _disposed = true;
         if (_master.Length > 0)
         {
             CryptographicOperations.ZeroMemory(_master);
             MemoryLocker.TryUnlock(_master);
         }
-        GC.SuppressFinalize(this);
-    }
-
-    ~NoopKeyAtRestProtector()
-    {
-        try { Dispose(); } catch { /* finalizer must not throw */ }
     }
 }
 
@@ -190,8 +186,10 @@ internal sealed class NoopKeyAtRestProtector : KeyAtRestProtector, IDisposable
 ///   <c>TopSecret.ProtectedString.LinuxTpm</c> NuGets register TPM 2.0
 ///   providers here.</item>
 ///   <item><b>Obscurity (software wrap)</b> —
-///   <see cref="WindowsAesGcmEphemeralProtector"/> on Windows,
-///   <see cref="HkdfWrapProtector"/> as the universal fallback.</item>
+///   <see cref="AesGcmWrapProtector"/> on every platform (AES-GCM comes
+///   from <see cref="AesGcmShim"/>, which is cross-platform including
+///   browser-wasm), with <see cref="HkdfWrapProtector"/> as the fallback
+///   only when AES-GCM construction declines.</item>
 /// </list>
 /// <para>
 /// <see cref="KeyAtRestProtection.HardwareBackedRequired"/> stops at tier 1
@@ -427,7 +425,9 @@ public static class KeyAtRestProtectorFactory
         lock (s_registerLock) registryEmpty = s_registered.Count == 0;
         if (!registryEmpty) return;
 
-        if (Interlocked.CompareExchange(ref s_warnedNoProvider, 1, 0) != 0) return;
+        // Cheap pre-check so the (long) message is not built on every Create
+        // once the gate has tripped; WarnOnce.Trace re-checks atomically.
+        if (Volatile.Read(ref s_warnedNoProvider) != 0) return;
 
         string platformHint = OperatingSystem.IsWindows()
             ? "Reference the optional 'TopSecret.ProtectedString.WindowsTpm' NuGet (and ensure its ModuleInitializer fires before the first ProtectedString construction; if you use lazy assembly loading, call WindowsTpmRegistration.Register() explicitly in your composition root), or register your own hardware-backed provider via KeyAtRestProtectorFactory.RegisterHardwareBacked()."
@@ -435,7 +435,7 @@ public static class KeyAtRestProtectorFactory
                 ? "Reference the optional 'TopSecret.ProtectedString.LinuxTpm' NuGet (and ensure its ModuleInitializer fires before the first ProtectedString construction; if you use lazy assembly loading, call LinuxTpmRegistration.Register() explicitly in your composition root), or register your own hardware-backed provider via KeyAtRestProtectorFactory.RegisterHardwareBacked()."
                 : "No hardware-backed provider is registered for this platform; register one via KeyAtRestProtectorFactory.RegisterHardwareBacked() before the first ProtectedString construction.";
 
-        Trace.TraceWarning(
+        WarnOnce.Trace(ref s_warnedNoProvider,
             $"ProtectedString: KeyAtRestProtection is {mode} but no hardware-backed provider " +
             $"is registered for this platform. {platformHint}");
     }
@@ -543,17 +543,13 @@ public static class KeyAtRestProtectorFactory
 
     private static KeyAtRestProtector? TryCreateObscurity(byte[] master)
     {
-        if (OperatingSystem.IsWindows())
-        {
-            var windows = WindowsAesGcmEphemeralProtector.TryCreate(master);
-            if (windows is not null) return windows;
-            // Fall through to HKDF if AES-GCM construction declined
-            // (vanishingly unlikely — no external dependencies — but the
-            // contract permits null).
-        }
-
-        // Universal fallback. Always succeeds for a 32-byte master.
-        return HkdfWrapProtector.TryCreate(master);
+        // AES-GCM wrap on every platform: AesGcmShim is cross-platform
+        // (in-box AesGcm, BouncyCastle on browser-wasm), so there is nothing
+        // OS-specific about this tier. Fall through to HKDF only if AES-GCM
+        // construction declined (vanishingly unlikely, but the contract
+        // permits null); HKDF always succeeds for a 32-byte master.
+        return (KeyAtRestProtector?)AesGcmWrapProtector.TryCreate(master)
+            ?? HkdfWrapProtector.TryCreate(master);
     }
 
     private static string BuildRequiredFailureMessage()
@@ -571,5 +567,34 @@ public static class KeyAtRestProtectorFactory
             "protector is available for this platform." + hint +
             " Set KeyAtRestProtection.HardwareBackedPreferred to fall back to obscurity, or set " +
             "KeyAtRestProtection.Obscurity / None to opt out of hardware-backed wrapping.";
+    }
+}
+
+/// <summary>
+/// Shared body of the satellite packages' <c>&lt;Platform&gt;TpmRegistration.Register()</c>
+/// entry points: a once-only, thread-safe
+/// <see cref="KeyAtRestProtectorFactory.RegisterHardwareBacked"/>. Each
+/// package keeps its own public <c>Register()</c> and
+/// <c>[ModuleInitializer]</c>; only the idempotency gate + registration
+/// call live here so the two cannot drift.
+/// </summary>
+internal static class HardwareProviderRegistration
+{
+    /// <summary>
+    /// Registers <paramref name="factory"/> the first time it is called for
+    /// a given <paramref name="gate"/>; every later call is a no-op.
+    /// </summary>
+    /// <param name="gate">A static <see cref="int"/> owned by the caller, initially <c>0</c>.</param>
+    /// <param name="factory">See <see cref="KeyAtRestProtectorFactory.RegisterHardwareBacked"/>.</param>
+    /// <param name="probe">See <see cref="KeyAtRestProtectorFactory.RegisterHardwareBacked"/>.</param>
+    /// <param name="transientSlotConstrained">See <see cref="KeyAtRestProtectorFactory.RegisterHardwareBacked"/>.</param>
+    public static void RegisterOnce(
+        ref int gate,
+        KeyAtRestProtectorFactory.HardwareBackedFactory factory,
+        KeyAtRestProtectorFactory.HardwareBackedAvailabilityProbe probe,
+        bool transientSlotConstrained)
+    {
+        if (Interlocked.CompareExchange(ref gate, 1, 0) != 0) return;
+        KeyAtRestProtectorFactory.RegisterHardwareBacked(factory, probe, transientSlotConstrained);
     }
 }

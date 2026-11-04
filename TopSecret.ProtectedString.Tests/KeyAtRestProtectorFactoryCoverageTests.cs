@@ -295,6 +295,33 @@ public class KeyAtRestProtectorFactoryCoverageTests
             }
         }
 
+        // The obscurity tier is AES-GCM-wrap on every platform (AesGcmShim is
+        // cross-platform); HKDF is reached only if AES-GCM construction declines.
+        [Test]
+        public void Obscurity_selects_AesGcmWrapProtector_on_every_platform()
+        {
+            ProtectedStringOptions.KeyAtRestProtection = KeyAtRestProtection.Obscurity;
+            ProtectedStringOptions.UnwrappedKeyCacheTtl = TimeSpan.Zero;
+
+            var master = RandomNumberGenerator.GetBytes(32);
+            var expected = master.ToArray();
+
+            var protector = KeyAtRestProtectorFactory.Create(master);
+            try
+            {
+                Assert.That(protector, Is.InstanceOf<AesGcmWrapProtector>(),
+                    "the obscurity tier must pick the AES-GCM wrap regardless of OS");
+                Assert.That(master, Is.All.EqualTo((byte)0),
+                    "the obscurity protector takes ownership of the master and zeros the input array");
+                using var unwrapped = protector.UnwrapKey();
+                Assert.That(unwrapped.Key, Is.EqualTo(expected));
+            }
+            finally
+            {
+                (protector as IDisposable)?.Dispose();
+            }
+        }
+
         // Covers KeyAtRestProtector.cs 445,450 (obscurity tier total miss →
         // HardeningPolicy.OnFailure) and 454 (final no-op fallback).
         [Test]

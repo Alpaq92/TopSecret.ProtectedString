@@ -7,47 +7,38 @@ namespace TopSecret;
 /// Pure-managed obscurity wrap: at init, generate a 32-byte random wrap key,
 /// HKDF-SHA256-derive a 32-byte stream from it, XOR the master against the
 /// stream, and store the wrap key + the wrapped master in two separate pinned
-/// buffers. <see cref="UnwrapKey"/> re-derives the stream from the wrap key
-/// and XORs the wrapped master back to plaintext.
+/// buffers. <see cref="KeyAtRestProtector.UnwrapKey"/> re-derives the stream
+/// from the wrap key and XORs the wrapped master back to plaintext.
 /// </summary>
 /// <remarks>
 /// <para>
 /// Both buffers live in the process heap, so a heap dump still contains
 /// everything an attacker needs — they just have to know to recombine via the
 /// HKDF info string and the XOR. This is intentional: the protector exists as
-/// the cross-platform <see cref="KeyAtRestProtection.Obscurity"/> tier when no
-/// stronger primitive (Windows DPAPI, Linux AF_ALG, hardware-backed) is
-/// available.
+/// the last-resort <see cref="KeyAtRestProtection.Obscurity"/> tier when no
+/// stronger primitive (hardware-backed, guarded page,
+/// <see cref="AesGcmWrapProtector"/>) is available.
 /// </para>
 /// <para>
-/// Why XOR-with-HKDF-stream instead of AES? AES keyed by another in-process
-/// key is no stronger here — the wrap key is in the same dump as the wrapped
-/// blob — and adds an <see cref="AesGcm"/> instance per op on top of the AES
-/// instance the library is already running. XOR keeps the per-op cost
-/// negligible.
+/// <b>Role in the factory.</b> <see cref="AesGcmWrapProtector"/> is the
+/// obscurity tier's first choice on every platform. This protector is the
+/// fallback the factory reaches only when AES-GCM construction declines —
+/// it has no dependencies beyond <see cref="HKDF"/> and raw XOR, so it
+/// always succeeds for a 32-byte master. Security-wise the two are
+/// equivalent against the in-process dump attacker (the wrap key sits in
+/// the same dump as the wrapped blob either way); the AEAD variant is
+/// preferred because a torn or corrupted envelope fails the tag check
+/// instead of silently unwrapping to garbage.
 /// </para>
 /// </remarks>
-internal sealed class HkdfWrapProtector : KeyAtRestProtector, IDisposable
+internal sealed class HkdfWrapProtector : DisposableKeyAtRestProtector
 {
-    private const int MasterKeySize = 32;
     private static readonly byte[] s_hkdfInfo = Encoding.UTF8.GetBytes("TopSecret.ProtectedString/HkdfWrap/v1");
 
     private readonly byte[] _wrapKey;
     private readonly byte[] _wrappedMaster;
-    private bool _disposed;
 
-    public static HkdfWrapProtector? TryCreate(byte[] master)
-    {
-        if (master.Length != MasterKeySize) return null;
-        try
-        {
-            return CreateOrThrow(master);
-        }
-        catch
-        {
-            return null;
-        }
-    }
+    public static HkdfWrapProtector? TryCreate(byte[] master) => TryCreate(master, CreateOrThrow);
 
     private static HkdfWrapProtector CreateOrThrow(byte[] master)
     {
@@ -100,14 +91,12 @@ internal sealed class HkdfWrapProtector : KeyAtRestProtector, IDisposable
         _wrappedMaster = wrappedMaster;
     }
 
-    public override KeyAccessor UnwrapKey()
+    protected override KeyAccessor UnwrapCore()
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
-
-        var unwrapped = ProtectedString.AllocatePinnedBytes(
-            MasterKeySize, excludeFromDumps: true, lockContext: "memory locking unwrapped key");
-
-        bool ok = false;
+        // XOR onto the stack, promote into the locked ephemeral, wipe the
+        // stack copy. The HKDF stream itself is a regular-heap byte[] that
+        // is zeroed as soon as the XOR completes.
+        Span<byte> plaintext = stackalloc byte[MasterKeySize];
         try
         {
             var stream = HKDF.DeriveKey(HashAlgorithmName.SHA256, _wrapKey, MasterKeySize, info: s_hkdfInfo);
@@ -115,42 +104,26 @@ internal sealed class HkdfWrapProtector : KeyAtRestProtector, IDisposable
             {
                 for (int i = 0; i < MasterKeySize; i++)
                 {
-                    unwrapped[i] = (byte)(_wrappedMaster[i] ^ stream[i]);
+                    plaintext[i] = (byte)(_wrappedMaster[i] ^ stream[i]);
                 }
             }
             finally
             {
                 CryptographicOperations.ZeroMemory(stream);
             }
-            ok = true;
-            return KeyAccessor.Ephemeral(unwrapped);
+            return EphemeralFrom(plaintext);
         }
         finally
         {
-            if (!ok)
-            {
-                CryptographicOperations.ZeroMemory(unwrapped);
-                MemoryLocker.TryUnlock(unwrapped);
-            }
+            CryptographicOperations.ZeroMemory(plaintext);
         }
     }
 
-    public void Dispose()
+    protected override void ReleaseResources()
     {
-        if (_disposed) return;
         CryptographicOperations.ZeroMemory(_wrapKey);
         CryptographicOperations.ZeroMemory(_wrappedMaster);
         MemoryLocker.TryUnlock(_wrapKey);
         MemoryLocker.TryUnlock(_wrappedMaster);
-        _disposed = true;
-        GC.SuppressFinalize(this);
-    }
-
-    ~HkdfWrapProtector()
-    {
-        // Bound RLIMIT_MEMLOCK / working-set growth when callers forget to
-        // dispose: the wrap key and wrapped master are mlocked / VirtualLocked
-        // pages, and only Dispose unlocks them.
-        try { Dispose(); } catch { /* finalizer must not throw */ }
     }
 }
