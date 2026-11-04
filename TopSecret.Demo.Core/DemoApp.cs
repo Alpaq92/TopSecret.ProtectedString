@@ -32,7 +32,7 @@ public static class DemoApp
 
         Console.WriteLine($"  Hardware-backed availability: {ProtectedString.HardwareBackedAvailability}");
         Console.WriteLine($"  Configured key-at-rest tier:  {ProtectedStringOptions.KeyAtRestProtection}");
-        Console.WriteLine($"  Obscurity wrap (if reached):  {(OperatingSystem.IsWindows() ? "AES-GCM-256 with per-protector random wrap key" : "HKDF stream-XOR")}");
+        Console.WriteLine("  Obscurity wrap (if reached):  AES-GCM-256 with per-protector random wrap key (HKDF stream-XOR fallback)");
         Console.WriteLine();
 
         // Every run works on fresh random inputs (DemoInputs), so the lengths,

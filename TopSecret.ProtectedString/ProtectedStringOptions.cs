@@ -309,7 +309,8 @@ public static class ProtectedStringOptions
     /// <b>Default changed in 2.4.</b> Prior versions defaulted to
     /// <see cref="TopSecret.KeyAtRestProtection.None"/> (plaintext master in
     /// pinned/locked/dump-excluded memory). The new default costs one extra
-    /// HKDF derive (or, on Windows, one AES-GCM unwrap) per master unwrap,
+    /// AES-GCM-256 unwrap of the 32-byte master (the same wrap on every
+    /// platform; HKDF stream-XOR only if AES-GCM construction declines),
     /// amortizable to near-zero with <see cref="UnwrappedKeyCacheTtl"/>. Set
     /// this back to <see cref="TopSecret.KeyAtRestProtection.None"/> explicitly
     /// if you need the old zero-overhead behavior.
