@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.8.1](https://github.com/Alpaq92/TopSecret.ProtectedString/compare/v2.8.0...v2.8.1) (2026-11-04)
+
+
+### Refactoring
+
+* strip comments and XML docs; condense README ([#47](https://github.com/Alpaq92/TopSecret.ProtectedString/issues/47)) ([f0ebe22](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/f0ebe229c3b1d26edfc532cb2e35d3452e8fc029))
+
 ## [2.8.0](https://github.com/Alpaq92/TopSecret.ProtectedString/compare/v2.7.0...v2.8.0) (2026-11-04)
 
 
