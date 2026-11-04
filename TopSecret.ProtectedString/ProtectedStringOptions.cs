@@ -214,8 +214,16 @@ public static class ProtectedStringOptions
     /// <see cref="TopSecret.KeyAtRestProtection.HardwareBackedRequired"/>). Defaults
     /// to <see cref="MemoryLockingFailureBehavior.LogWarning"/>.
     /// </summary>
-    public static MemoryLockingFailureBehavior MemoryLockingFailureBehavior { get; set; }
-        = MemoryLockingFailureBehavior.LogWarning;
+    public static MemoryLockingFailureBehavior MemoryLockingFailureBehavior
+    {
+        get => s_memoryLockingFailureBehavior;
+        set
+        {
+            ThrowIfUndefined(value);
+            s_memoryLockingFailureBehavior = value;
+        }
+    }
+    private static MemoryLockingFailureBehavior s_memoryLockingFailureBehavior = MemoryLockingFailureBehavior.LogWarning;
 
     /// <summary>
     /// Process-key rotation policy. Defaults to
@@ -246,8 +254,16 @@ public static class ProtectedStringOptions
     /// key has been zeroed from process memory.
     /// </para>
     /// </remarks>
-    public static ProcessKeyRotation ProcessKeyRotationPolicy { get; set; }
-        = ProcessKeyRotation.Disabled;
+    public static ProcessKeyRotation ProcessKeyRotationPolicy
+    {
+        get => s_processKeyRotationPolicy;
+        set
+        {
+            ThrowIfUndefined(value);
+            s_processKeyRotationPolicy = value;
+        }
+    }
+    private static ProcessKeyRotation s_processKeyRotationPolicy = ProcessKeyRotation.Disabled;
 
     /// <summary>
     /// Interval between automatic rotations when
@@ -259,11 +275,15 @@ public static class ProtectedStringOptions
     /// any read-once option is mutated late so the silent no-op is at least
     /// loud.
     /// </summary>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// The value is negative or exceeds <see cref="MaxTimerDuration"/>.
+    /// </exception>
     public static TimeSpan ProcessKeyRotationInterval
     {
         get => s_processKeyRotationInterval;
         set
         {
+            ThrowIfOutsideTimerRange(value, nameof(value));
             WarnIfLateMutation(nameof(ProcessKeyRotationInterval));
             s_processKeyRotationInterval = value;
         }
@@ -327,11 +347,18 @@ public static class ProtectedStringOptions
     /// runtime instead.
     /// </para>
     /// </remarks>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <paramref name="value"/> is not a defined <see cref="TopSecret.KeyAtRestProtection"/>
+    /// member. Undefined values (an integer cast, or a bitwise combination of
+    /// members) are rejected here rather than silently degrading to the
+    /// obscurity or no-op tier inside the protector factory.
+    /// </exception>
     public static KeyAtRestProtection KeyAtRestProtection
     {
         get => s_keyAtRestProtection;
         set
         {
+            ThrowIfUndefined(value);
             WarnIfLateMutation(nameof(KeyAtRestProtection));
             s_keyAtRestProtection = value;
         }
@@ -384,11 +411,46 @@ public static class ProtectedStringOptions
                 throw new ArgumentOutOfRangeException(nameof(value), value,
                     "UnwrappedKeyCacheTtl must be non-negative. Use TimeSpan.Zero to disable caching.");
             }
+            // The cache's wipe timer is a System.Threading.Timer, whose
+            // maximum due time is 4 294 967 294 ms (~49.7 days). A larger
+            // TTL used to make Timer.Change throw after the cached key had
+            // already been installed, leaving a zeroed buffer behind as the
+            // "cached" master. Reject it up front instead.
+            ThrowIfOutsideTimerRange(value, nameof(value));
             WarnIfLateMutation(nameof(UnwrappedKeyCacheTtl));
             s_unwrappedKeyCacheTtl = value;
         }
     }
     private static TimeSpan s_unwrappedKeyCacheTtl = TimeSpan.Zero;
+
+    // ---- validation --------------------------------------------------------
+
+    /// <summary>
+    /// Largest duration <see cref="System.Threading.Timer"/> accepts
+    /// (4 294 967 294 ms, about 49.7 days). <see cref="UnwrappedKeyCacheTtl"/>
+    /// and <see cref="ProcessKeyRotationInterval"/> are capped at this value
+    /// because both are fed straight into a timer.
+    /// </summary>
+    public static readonly TimeSpan MaxTimerDuration = TimeSpan.FromMilliseconds(uint.MaxValue - 1);
+
+    private static void ThrowIfUndefined<TEnum>(TEnum value) where TEnum : struct, Enum
+    {
+        if (!Enum.IsDefined(value))
+        {
+            throw new ArgumentOutOfRangeException(nameof(value), value,
+                $"{typeof(TEnum).Name} value {Convert.ToInt64(value)} is not a defined member. " +
+                "Integer casts and bitwise combinations of members are not accepted.");
+        }
+    }
+
+    private static void ThrowIfOutsideTimerRange(TimeSpan value, string paramName)
+    {
+        if (value < TimeSpan.Zero || value > MaxTimerDuration)
+        {
+            throw new ArgumentOutOfRangeException(paramName, value,
+                $"Value must be between TimeSpan.Zero and {nameof(MaxTimerDuration)} ({MaxTimerDuration}).");
+        }
+    }
 
     // ---- late-mutation diagnostic --------------------------------------
 

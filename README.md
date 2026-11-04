@@ -441,16 +441,19 @@ It also opts into `KeyAtRestProtection.HardwareBackedPreferred` at startup so th
 | `AppendChars(ReadOnlySpan<char>)` | Bulk sibling of `AppendChar` — one capacity check and one copy for the whole span. Same build-mode semantics. |
 | `AppendUtf8(ReadOnlySpan<byte>)` | Decode UTF-8 bytes and append them — the input-side sibling of `WriteUtf8To`/`Utf8Access`. The decode target is pooled, locked, wiped scratch, so a secret arriving as UTF-8 enters without a managed `string`/`char[]` detour. |
 | `static FromUtf8(ReadOnlySpan<byte>)` | Build a read-only instance from UTF-8 bytes with no intermediate managed `string`. Equivalent to `new ProtectedString()` + `AppendUtf8` + `MakeReadOnly`. See [Binding a secret from JSON](#binding-a-secret-from-json) for the `System.Text.Json` companion built on this. |
+| `static Build(Action<ProtectedString> fill)` | Build a read-only instance by appending into a fresh empty one inside `fill` (`AppendChar` / `AppendChars` / `AppendUtf8`), then `MakeReadOnly`. If `fill` throws, the half-built instance is disposed and its build buffer wiped before the exception propagates — the factory the XML satellite is built on, so callers never hand-write the dispose-on-failure dance. |
 | `ToSecureString()` *(extension, `SecureStringInterop`)* | Single-copy bridge for APIs whose signatures demand a genuine `SecureString` (`SqlCredential`, `PSCredential`) — built under `fixed` via the unsafe `SecureString(char*, int)` constructor, returned read-only. See [ADO.NET — `SqlCredential` and connection strings](#adonet--sqlcredential-and-connection-strings) for lifetime guidance. |
 | `Copy()` | Independent, writable copy. |
 | `Equals(ProtectedString)` | Constant-time comparison. (`Equals(object?)` is a one-line override that defers to this; same behavior.) |
 | `GetHashCode()` | Length-only hash. Plaintext intentionally does not contribute, so a dictionary-bucket lookup never reveals anything about the secret through its hash function. |
 | `ToString()` | Returns `ProtectedString[length=N]` (or `ProtectedString[disposed]`) — never the plaintext, so accidental logging is safe. |
 | `ComputeArgon2idHash(salt, iterations, memoryKb, parallelism, hashLengthBytes)` | Compute an Argon2id hash of the plaintext. OWASP-aligned defaults (`t=3`, `m=19 MiB`, `p=1`, 32-byte output). Works on the single-threaded browser runtime at the default `p=1`; throws `PlatformNotSupportedException` there if `parallelism` is raised above 1 (see [`browser-wasm` support](#browser-wasm-support)). |
-| `VerifyArgon2idHash(expectedHash, salt, iterations, memoryKb, parallelism)` | Constant-time verification against a previously stored hash. Same browser behavior as `ComputeArgon2idHash`. |
+| `VerifyArgon2idHash(expectedHash, salt, iterations, memoryKb, parallelism)` | Constant-time verification against a previously stored hash. Returns `false` (never throws) for a stored hash shorter than the 16-byte minimum this type produces. Same browser behavior as `ComputeArgon2idHash`. |
+| `ComputeArgon2idHash(salt, Argon2idCalibration, hashLengthBytes)` / `VerifyArgon2idHash(expectedHash, salt, Argon2idCalibration)` | Same two operations with the cost parameters taken straight from an [`Argon2Calibrator.Tune`](#argon2id-password-hashing) result, so a startup calibration feeds the hash without copying three fields by hand. |
 | `Dispose()` | Zero the ciphertext, nonce, tag, and any in-flight build buffer. |
 | `static HardwareBackedAvailability` | Probe whether a hardware-backed master-key protector is available on this host. See [Key-at-rest wrapping](#key-at-rest-wrapping-opt-in-tiered). |
 | `static RotateProcessKey()` | Re-encrypt every live instance under a fresh master AES key. Requires `ProcessKeyRotationPolicy != Disabled`. See [Process-key rotation](#process-key-rotation-opt-in). |
+| `static TryRotateProcessKey()` | Same as `RotateProcessKey()` but returns `false` when the call was dropped because another rotation was already in flight — the one case the `void` form cannot report. Use it when a rotation is a reaction to a compromise signal and you need to know the key actually moved. |
 
 > **Caveat — `ProtectedString(string)`.** `string` cannot be reliably erased from memory — see [How safe is `new string(plain)`...](#11-how-safe-is-new-stringplain-inside-access) for the full explanation. Prefer `ReadOnlySpan<char>`, a `char[]` you control, or `AppendChar`.
 
@@ -732,7 +735,7 @@ What rotation does:
 2. Snapshots the registry (pruning dead weak refs).
 3. For each live instance, takes the per-instance lock, decrypts under the old master, re-encrypts under the new one, and updates the instance's protector reference.
 
-Concurrent operations on instances *not* currently being migrated proceed unblocked. Concurrent `RotateProcessKey()` calls are deduplicated — if a rotation is already in flight, the second call returns immediately.
+Concurrent operations on instances *not* currently being migrated proceed unblocked. Concurrent `RotateProcessKey()` calls are deduplicated — if a rotation is already in flight, the second call returns immediately; `TryRotateProcessKey()` returns `false` in that case so a caller that must know the key moved can retry instead of assuming.
 
 > **Threat-model honesty.** Rotation only bounds *historical* exposure — ciphertext captured under a key that has since rotated cannot be recovered without that old key, and the old key has been zeroed. See [Threat model](#threat-model) for what rotation does not cover.
 
@@ -828,7 +831,7 @@ Argon2id is **intentionally slow** — that is its job as a password KDF. At the
 
 ```csharp
 var p = Argon2Calibrator.Tune(TimeSpan.FromMilliseconds(300)); // interactive-login target
-var hash = password.ComputeArgon2idHash(salt, p.Iterations, p.MemoryKb, p.Parallelism);
+var hash = password.ComputeArgon2idHash(salt, p);   // or spell out p.Iterations, p.MemoryKb, p.Parallelism
 ```
 
 The API is deliberately **synchronous-only**, and works on every supported platform including `net10.0-browser`. An async shape (`ComputeArgon2idHashAsync`, awaiting the KDF instead of blocking) was prototyped as an *alternative* route to browser support and then **rejected after an adversarial review**: the sync method holds the per-instance lock for the whole KDF, and releasing that lock across an `await` demonstrably regresses three security invariants (overlapping KDF-lifetime pinned scratch copies under page-granular, non-refcounted `VirtualLock`/`mlock`; the loss of "`Dispose` returned ⇒ no library-held plaintext copy exists"; and a stale-verify linearization race). Restoring those invariants requires a per-instance async gate plus deadlock guards — more concurrency machinery than a security-critical type should carry. The sync API works in the browser today via a different fix, entirely inside the underlying Argon2 dependency — see below.

@@ -582,6 +582,34 @@ public sealed class ProtectedString : IDisposable, IEquatable<ProtectedString>
     }
 
     /// <summary>
+    /// Creates a read-only <see cref="ProtectedString"/> by handing a fresh,
+    /// empty instance to <paramref name="fill"/> — which appends the secret via
+    /// <see cref="AppendChar"/> / <see cref="AppendChars"/> /
+    /// <see cref="AppendUtf8"/> — then calling <see cref="MakeReadOnly"/>. If
+    /// <paramref name="fill"/> throws, the half-built instance is disposed
+    /// (its build buffer wiped) before the exception propagates, so callers
+    /// never have to write the <c>try { ... } catch { ps.Dispose(); throw; }</c>
+    /// dance themselves. This is the factory the Xml satellite uses.
+    /// </summary>
+    /// <exception cref="ArgumentNullException"><paramref name="fill"/> is null.</exception>
+    public static ProtectedString Build(Action<ProtectedString> fill)
+    {
+        ArgumentNullException.ThrowIfNull(fill);
+        var ps = new ProtectedString();
+        try
+        {
+            fill(ps);
+            ps.MakeReadOnly();
+            return ps;
+        }
+        catch
+        {
+            ps.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>
     /// Allocates a pinned/locked build buffer of at least
     /// <paramref name="minimumCapacity"/> characters, decrypting any existing
     /// ciphertext into the front of it. Caller holds <see cref="_sync"/>.
@@ -677,19 +705,7 @@ public sealed class ProtectedString : IDisposable, IEquatable<ProtectedString>
     public void Access(ReadOnlySpanAction<char> handler)
     {
         ArgumentNullException.ThrowIfNull(handler);
-        lock (_sync)
-        {
-            ThrowIfDisposed();
-            LockedScratchPool.Lease? lease = null;
-            try
-            {
-                handler(RentPlaintextLocked(out lease));
-            }
-            finally
-            {
-                lease?.Return();
-            }
-        }
+        UsePlaintext(handler, static (plain, h) => { h(plain); return 0; });
     }
 
     /// <summary>
@@ -701,19 +717,7 @@ public sealed class ProtectedString : IDisposable, IEquatable<ProtectedString>
     public T Access<T>(ReadOnlySpanFunc<char, T> handler)
     {
         ArgumentNullException.ThrowIfNull(handler);
-        lock (_sync)
-        {
-            ThrowIfDisposed();
-            LockedScratchPool.Lease? lease = null;
-            try
-            {
-                return handler(RentPlaintextLocked(out lease));
-            }
-            finally
-            {
-                lease?.Return();
-            }
-        }
+        return UsePlaintext(handler, static (plain, h) => h(plain));
     }
 
     /// <summary>
@@ -876,34 +880,28 @@ public sealed class ProtectedString : IDisposable, IEquatable<ProtectedString>
             throw new ArgumentException("Destination stream is not writable.", nameof(destination));
         }
 
-        lock (_sync)
+        return UsePlaintext(destination, static (source, stream) =>
         {
-            ThrowIfDisposed();
-            if (_length == 0) return 0;
+            if (source.IsEmpty) return 0;
 
-            LockedScratchPool.Lease? lease = null;
-            byte[]? bytes = null;
+            // The UTF-8 staging stays a dedicated array (not pooled
+            // scratch): it is handed to an arbitrary Stream
+            // implementation, and a stream that captured a pooled slab
+            // reference could read every future secret staged there.
+            int byteCount = Encoding.UTF8.GetByteCount(source);
+            byte[] bytes = AllocatePinnedBytes(byteCount, excludeFromDumps: true);
             try
             {
-                ReadOnlySpan<char> source = RentPlaintextLocked(out lease);
-
-                // The UTF-8 staging stays a dedicated array (not pooled
-                // scratch): it is handed to an arbitrary Stream
-                // implementation, and a stream that captured a pooled slab
-                // reference could read every future secret staged there.
-                int byteCount = Encoding.UTF8.GetByteCount(source);
-                bytes = AllocatePinnedBytes(byteCount, excludeFromDumps: true);
                 int written = Encoding.UTF8.GetBytes(source, bytes);
                 Debug.Assert(written == byteCount);
-                destination.Write(bytes, 0, written);
+                stream.Write(bytes, 0, written);
                 return written;
             }
             finally
             {
-                lease?.Return();
-                if (bytes is not null) ZeroBytes(bytes);
+                ZeroBytes(bytes);
             }
-        }
+        });
     }
 
     /// <summary>
@@ -927,27 +925,16 @@ public sealed class ProtectedString : IDisposable, IEquatable<ProtectedString>
     public int WriteUtf8To(IBufferWriter<byte> destination)
     {
         ArgumentNullException.ThrowIfNull(destination);
-        lock (_sync)
+        return UsePlaintext(destination, static (source, writer) =>
         {
-            ThrowIfDisposed();
-            if (_length == 0) return 0;
-
-            LockedScratchPool.Lease? lease = null;
-            try
-            {
-                ReadOnlySpan<char> source = RentPlaintextLocked(out lease);
-                int byteCount = Encoding.UTF8.GetByteCount(source);
-                var span = destination.GetSpan(byteCount);
-                int written = Encoding.UTF8.GetBytes(source, span);
-                Debug.Assert(written == byteCount);
-                destination.Advance(written);
-                return written;
-            }
-            finally
-            {
-                lease?.Return();
-            }
-        }
+            if (source.IsEmpty) return 0;
+            int byteCount = Encoding.UTF8.GetByteCount(source);
+            var span = writer.GetSpan(byteCount);
+            int written = Encoding.UTF8.GetBytes(source, span);
+            Debug.Assert(written == byteCount);
+            writer.Advance(written);
+            return written;
+        });
     }
 
     /// <summary>
@@ -968,32 +955,28 @@ public sealed class ProtectedString : IDisposable, IEquatable<ProtectedString>
     public void Utf8Access(ReadOnlySpanAction<byte> handler)
     {
         ArgumentNullException.ThrowIfNull(handler);
-        lock (_sync)
+        UsePlaintext(handler, static (source, h) =>
         {
-            ThrowIfDisposed();
-            LockedScratchPool.Lease? lease = null;
-            LockedScratchPool.Lease? utf8Lease = null;
+            int byteCount = Encoding.UTF8.GetByteCount(source);
+            if (byteCount == 0)
+            {
+                h(ReadOnlySpan<byte>.Empty);
+                return 0;
+            }
+            var utf8Lease = LockedScratchPool.Rent(byteCount);
             try
             {
-                ReadOnlySpan<char> source = RentPlaintextLocked(out lease);
-                int byteCount = Encoding.UTF8.GetByteCount(source);
-                if (byteCount == 0)
-                {
-                    handler(ReadOnlySpan<byte>.Empty);
-                    return;
-                }
-                utf8Lease = LockedScratchPool.Rent(byteCount);
                 var bytes = utf8Lease.Bytes(byteCount);
                 int written = Encoding.UTF8.GetBytes(source, bytes);
                 Debug.Assert(written == byteCount);
-                handler(bytes);
+                h(bytes);
+                return 0;
             }
             finally
             {
-                utf8Lease?.Return();
-                lease?.Return();
+                utf8Lease.Return();
             }
-        }
+        });
     }
 
     /// <summary>
@@ -1033,24 +1016,10 @@ public sealed class ProtectedString : IDisposable, IEquatable<ProtectedString>
 
     /// <summary>Returns an independent copy of this instance.</summary>
     /// <remarks>The copy is read-write even if the source is read-only.</remarks>
-    public ProtectedString Copy()
-    {
-        lock (_sync)
-        {
-            ThrowIfDisposed();
-            LockedScratchPool.Lease? lease = null;
-            try
-            {
-                // The constructor copies the span immediately, so pooled
-                // scratch never outlives this frame.
-                return new ProtectedString(RentPlaintextLocked(out lease));
-            }
-            finally
-            {
-                lease?.Return();
-            }
-        }
-    }
+    public ProtectedString Copy() =>
+        // The constructor copies the span immediately, so pooled scratch
+        // never outlives the callback.
+        UsePlaintext(0, static (plain, _) => new ProtectedString(plain));
 
     /// <summary>
     /// Constant-time equality (via
@@ -1118,13 +1087,13 @@ public sealed class ProtectedString : IDisposable, IEquatable<ProtectedString>
     /// <summary>
     /// Computes an Argon2id hash of the UTF-8 encoded plaintext using the
     /// supplied <paramref name="salt"/> and parameters. Suitable for storing
-    /// password verifiers; <see cref="VerifyArgon2idHash"/> is the matching
+    /// password verifiers; <see cref="VerifyArgon2idHash(byte[], byte[], int, int, int)"/> is the matching
     /// constant-time verifier.
     /// </summary>
     /// <param name="salt">
     /// A unique, per-secret random salt of at least 8 bytes. <see cref="RandomNumberGenerator.GetBytes(int)"/>
     /// with a length of 16 is a sane default. The same salt must be supplied to
-    /// <see cref="VerifyArgon2idHash"/> for the comparison to succeed.
+    /// <see cref="VerifyArgon2idHash(byte[], byte[], int, int, int)"/> for the comparison to succeed.
     /// </param>
     /// <param name="iterations">Time cost. OWASP recommends ≥3 for interactive logins; defaults to <see cref="DefaultArgon2idIterations"/>.</param>
     /// <param name="memoryKb">Memory cost in KiB. OWASP recommends ≥19 456 (≈19 MiB) for interactive logins; defaults to <see cref="DefaultArgon2idMemoryKb"/>.</param>
@@ -1157,21 +1126,44 @@ public sealed class ProtectedString : IDisposable, IEquatable<ProtectedString>
         if (parallelism < 1) throw new ArgumentOutOfRangeException(nameof(parallelism));
         if (hashLengthBytes < 16) throw new ArgumentOutOfRangeException(nameof(hashLengthBytes));
 
+        // The whole KDF runs under _sync ON PURPOSE — see the README's
+        // "Argon2id ... synchronous-only" rationale: releasing the lock for
+        // the derivation would let Dispose return while this method still
+        // holds a pinned plaintext copy, and opens a stale-verify race. What
+        // does NOT need to span the derivation is the pooled plaintext lease:
+        // the UTF-8 bytes are copied into a dedicated pinned array first and
+        // the lease is returned before the hundreds-of-ms KDF starts, so a
+        // hash in flight pins one private buffer, not a shared pool chunk.
+        // Dedicated array (not pooled scratch): Argon2id's constructor
+        // requires a real byte[] and the reference crosses into the external
+        // KDF implementation.
         lock (_sync)
         {
             ThrowIfDisposed();
+
+            byte[] bytes;
             LockedScratchPool.Lease? lease = null;
-            byte[]? bytes = null;
             try
             {
                 ReadOnlySpan<char> plain = RentPlaintextLocked(out lease);
-                int byteCount = Encoding.UTF8.GetByteCount(plain);
-                // Dedicated array (not pooled scratch): Argon2id's constructor
-                // requires a real byte[] and the reference crosses into the
-                // external KDF implementation.
-                bytes = AllocatePinnedBytes(byteCount, excludeFromDumps: true);
-                Encoding.UTF8.GetBytes(plain, bytes);
+                bytes = AllocatePinnedBytes(Encoding.UTF8.GetByteCount(plain), excludeFromDumps: true);
+                try
+                {
+                    Encoding.UTF8.GetBytes(plain, bytes);
+                }
+                catch
+                {
+                    ZeroBytes(bytes);
+                    throw;
+                }
+            }
+            finally
+            {
+                lease?.Return();
+            }
 
+            try
+            {
                 using var argon = new Argon2id(bytes)
                 {
                     Salt = salt,
@@ -1183,11 +1175,23 @@ public sealed class ProtectedString : IDisposable, IEquatable<ProtectedString>
             }
             finally
             {
-                lease?.Return();
-                if (bytes is { Length: > 0 }) ZeroBytes(bytes);
+                ZeroBytes(bytes);
             }
         }
     }
+
+    /// <summary>
+    /// <see cref="ComputeArgon2idHash(byte[], int, int, int, int)"/> with the
+    /// cost parameters taken from an <see cref="Argon2idCalibration"/>
+    /// produced by <see cref="Argon2Calibrator.Tune"/>, so a calibration
+    /// measured at startup feeds the hash directly instead of being copied
+    /// field by field.
+    /// </summary>
+    public byte[] ComputeArgon2idHash(
+        byte[] salt,
+        Argon2idCalibration calibration,
+        int hashLengthBytes = DefaultArgon2idHashLength) =>
+        ComputeArgon2idHash(salt, calibration.Iterations, calibration.MemoryKb, calibration.Parallelism, hashLengthBytes);
 
     /// <summary>
     /// Constant-time comparison of an Argon2id hash of this instance (computed
@@ -1195,6 +1199,14 @@ public sealed class ProtectedString : IDisposable, IEquatable<ProtectedString>
     /// <paramref name="expectedHash"/>. The parameters must match the ones used
     /// when <paramref name="expectedHash"/> was originally produced.
     /// </summary>
+    /// <returns>
+    /// <see langword="true"/> when the hashes match. <see langword="false"/>
+    /// when they differ, and also when <paramref name="expectedHash"/> is
+    /// shorter than the 16-byte minimum this type ever produces — a stored
+    /// verifier that short cannot have come from
+    /// <see cref="ComputeArgon2idHash(byte[], int, int, int, int)"/>, so it
+    /// is treated as a non-match rather than an argument error.
+    /// </returns>
     public bool VerifyArgon2idHash(
         byte[] expectedHash,
         byte[] salt,
@@ -1203,6 +1215,7 @@ public sealed class ProtectedString : IDisposable, IEquatable<ProtectedString>
         int parallelism = DefaultArgon2idParallelism)
     {
         ArgumentNullException.ThrowIfNull(expectedHash);
+        if (expectedHash.Length < 16) return false;
         var actual = ComputeArgon2idHash(salt, iterations, memoryKb, parallelism, expectedHash.Length);
         try
         {
@@ -1213,6 +1226,14 @@ public sealed class ProtectedString : IDisposable, IEquatable<ProtectedString>
             CryptographicOperations.ZeroMemory(actual);
         }
     }
+
+    /// <summary>
+    /// <see cref="VerifyArgon2idHash(byte[], byte[], int, int, int)"/> with the
+    /// cost parameters taken from an <see cref="Argon2idCalibration"/>. The
+    /// calibration must be the one the verifier was produced with.
+    /// </summary>
+    public bool VerifyArgon2idHash(byte[] expectedHash, byte[] salt, Argon2idCalibration calibration) =>
+        VerifyArgon2idHash(expectedHash, salt, calibration.Iterations, calibration.MemoryKb, calibration.Parallelism);
 
     /// <summary>
     /// Returns a sentinel string that does <i>not</i> contain the plaintext.
@@ -1302,7 +1323,25 @@ public sealed class ProtectedString : IDisposable, IEquatable<ProtectedString>
     /// timer relies on this so a slow rotation cannot pile up callbacks.
     /// </para>
     /// </remarks>
-    public static void RotateProcessKey()
+    public static void RotateProcessKey() => TryRotateProcessKey();
+
+    /// <summary>
+    /// Same as <see cref="RotateProcessKey"/>, but reports whether this call
+    /// performed the rotation. Returns <see langword="false"/> when another
+    /// rotation was already in flight and this call was dropped — the case
+    /// <see cref="RotateProcessKey"/> cannot distinguish. A caller reacting
+    /// to a compromise signal can loop on <see langword="false"/> (or
+    /// otherwise confirm) instead of assuming the key moved.
+    /// </summary>
+    /// <returns>
+    /// <see langword="true"/> if a rotation pass ran to completion in this
+    /// call; <see langword="false"/> if a concurrent pass was already running.
+    /// </returns>
+    /// <exception cref="InvalidOperationException">
+    /// <see cref="ProtectedStringOptions.ProcessKeyRotationPolicy"/> is
+    /// <see cref="ProcessKeyRotation.Disabled"/>.
+    /// </exception>
+    public static bool TryRotateProcessKey()
     {
         if (ProtectedStringOptions.ProcessKeyRotationPolicy == ProcessKeyRotation.Disabled)
         {
@@ -1316,12 +1355,13 @@ public sealed class ProtectedString : IDisposable, IEquatable<ProtectedString>
         if (Interlocked.CompareExchange(ref s_rotationInFlight, 1, 0) != 0)
         {
             // Another rotation is already running — drop this call.
-            return;
+            return false;
         }
 
         try
         {
             RotateInternal();
+            return true;
         }
         finally
         {
@@ -1538,6 +1578,42 @@ public sealed class ProtectedString : IDisposable, IEquatable<ProtectedString>
     }
 
     // ---- internals -------------------------------------------------------
+
+    /// <summary>
+    /// Span-based plaintext callback carrying caller state, so the hot
+    /// read paths can share <see cref="UsePlaintext{TState, TResult}"/>
+    /// with a <c>static</c> lambda and no per-call closure allocation.
+    /// </summary>
+    private delegate TResult PlaintextFunc<in TState, out TResult>(ReadOnlySpan<char> plain, TState state);
+
+    /// <summary>
+    /// The one implementation of "take <see cref="_sync"/>, check disposed,
+    /// rent the plaintext, run the body, return the lease". Every span-based
+    /// reader (<see cref="Access(ReadOnlySpanAction{char})"/>,
+    /// <see cref="Utf8Access"/>, <see cref="WriteUtf8To(Stream)"/>,
+    /// <see cref="Copy"/>) goes through here so the rent/return discipline
+    /// exists exactly once. (The Argon2 path is the one deliberate
+    /// exception: it must drop the pooled lease <i>before</i> the KDF while
+    /// still holding <see cref="_sync"/> across it.) The span handed to
+    /// <paramref name="body"/> is pooled locked scratch (or the live build
+    /// buffer) and must not escape the callback.
+    /// </summary>
+    private TResult UsePlaintext<TState, TResult>(TState state, PlaintextFunc<TState, TResult> body)
+    {
+        lock (_sync)
+        {
+            ThrowIfDisposed();
+            LockedScratchPool.Lease? lease = null;
+            try
+            {
+                return body(RentPlaintextLocked(out lease), state);
+            }
+            finally
+            {
+                lease?.Return();
+            }
+        }
+    }
 
     private TResult AccessCore<TState, TResult>(TState state, Func<TState, char[], TResult> body)
     {

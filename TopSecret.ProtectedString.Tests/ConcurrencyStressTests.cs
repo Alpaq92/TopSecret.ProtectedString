@@ -41,6 +41,16 @@ public class ConcurrencyStressTests
         var failures = new System.Collections.Concurrent.ConcurrentQueue<string>();
         using var start = new ManualResetEventSlim(false);
 
+        // Diagnostics for the one-in-thousands failure this test has shown on
+        // macOS arm64 CI (an AuthenticationTagMismatchException on a freshly
+        // constructed instance, run 41813279078). When it recurs, the failure
+        // message must say which protector implementation was active, how
+        // many rotations had completed, and exactly which construction shape
+        // / operation / secret length the failing iteration used — the
+        // seeded RNG makes the latter reproducible, but only if recorded.
+        string protectorType = TestAccessors.GetProcessKeyProtector()?.GetType().Name ?? "(not initialised yet)";
+        int rotations = 0;
+
         // A rotator thread churns the process key while the workers operate,
         // so migrations race construction / Access / mutation.
         var rotating = true;
@@ -50,7 +60,10 @@ public class ConcurrencyStressTests
             start.Wait();
             while (Volatile.Read(ref rotating))
             {
-                try { ProtectedString.RotateProcessKey(); }
+                try
+                {
+                    if (ProtectedString.TryRotateProcessKey()) Interlocked.Increment(ref rotations);
+                }
                 catch (Exception ex) { failures.Enqueue("rotate: " + ex); }
                 Thread.SpinWait(rng.Next(50, 500));
             }
@@ -67,13 +80,17 @@ public class ConcurrencyStressTests
                 start.Wait();
                 for (int i = 0; i < perWorker; i++)
                 {
+                    int shape = -1, op = -1, secretLen = -1;
                     try
                     {
                         string expected = RandomSecret(rng);
-                        using var ps = Build(rng, expected);
+                        secretLen = expected.Length;
+                        shape = rng.Next(3);
+                        using var ps = Build(shape, expected);
 
                         // A mix of the operations that all rent pooled scratch.
-                        switch (rng.Next(5))
+                        op = rng.Next(5);
+                        switch (op)
                         {
                             case 0:
                                 AssertRoundTrip(ps, expected, failures, worker);
@@ -100,7 +117,9 @@ public class ConcurrencyStressTests
                     }
                     catch (Exception ex)
                     {
-                        failures.Enqueue($"w{worker}#{i}: {ex}");
+                        failures.Enqueue(
+                            $"w{worker}#{i} shape={ShapeName(shape)} op={OpName(op)} len={secretLen} " +
+                            $"rotationsSoFar={Volatile.Read(ref rotations)}: {ex}");
                     }
                 }
             });
@@ -113,9 +132,28 @@ public class ConcurrencyStressTests
         rotator.Join();
 
         Assert.That(failures, Is.Empty,
-            "concurrent operations under rotation must preserve round-trips:\n  " +
+            $"concurrent operations under rotation must preserve round-trips " +
+            $"(protector={protectorType}, rotations={rotations}, workers={workers}x{perWorker}):\n  " +
             string.Join("\n  ", failures.Take(20)));
     }
+
+    private static string ShapeName(int shape) => shape switch
+    {
+        0 => "span-ctor",
+        1 => "string-ctor",
+        2 => "build-mode",
+        _ => "n/a",
+    };
+
+    private static string OpName(int op) => op switch
+    {
+        0 => "Access",
+        1 => "Copy+Access",
+        2 => "Equals",
+        3 => "CopyTo",
+        4 => "Utf8Access",
+        _ => "n/a",
+    };
 
     [Test]
     public void Pool_hands_out_disjoint_zeroed_chunks_under_saturating_concurrency()
@@ -177,10 +215,10 @@ public class ConcurrencyStressTests
         return new string(chars);
     }
 
-    private static ProtectedString Build(Random rng, string value)
+    private static ProtectedString Build(int shape, string value)
     {
         // Exercise both construction shapes and the build-buffer path.
-        switch (rng.Next(3))
+        switch (shape)
         {
             case 0: return new ProtectedString(value.AsSpan());
             case 1: return new ProtectedString(value);

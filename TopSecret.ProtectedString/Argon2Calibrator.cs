@@ -6,8 +6,8 @@ namespace TopSecret;
 
 /// <summary>
 /// The Argon2id parameters produced by <see cref="Argon2Calibrator.Tune"/>,
-/// ready to pass to <see cref="ProtectedString.ComputeArgon2idHash"/> /
-/// <see cref="ProtectedString.VerifyArgon2idHash"/>.
+/// ready to pass to <see cref="ProtectedString.ComputeArgon2idHash(byte[], Argon2idCalibration, int)"/> /
+/// <see cref="ProtectedString.VerifyArgon2idHash(byte[], byte[], Argon2idCalibration)"/>.
 /// </summary>
 /// <param name="Iterations">Time cost (Argon2 <c>t</c>).</param>
 /// <param name="MemoryKb">Memory cost in KiB (Argon2 <c>m</c>).</param>
