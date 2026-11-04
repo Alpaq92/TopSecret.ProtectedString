@@ -1,5 +1,18 @@
 # Changelog
 
+## [2.8.0](https://github.com/Alpaq92/TopSecret.ProtectedString/compare/v2.7.0...v2.8.0) (2026-11-04)
+
+
+### Features
+
+* Bump the nuget-minor-and-patch group with 5 updates ([16dc1fb](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/16dc1fbf142eeb20e8731d0706b8d559bf552805))
+* **deps:** bump all NuGet packages and action pins to latest ([#45](https://github.com/Alpaq92/TopSecret.ProtectedString/issues/45)) ([0a16a3d](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/0a16a3deff8d5cf66a4f6a873a898918309f3a70))
+
+
+### Bug Fixes
+
+* **deps:** Bump the codeql-action group with 2 updates ([#42](https://github.com/Alpaq92/TopSecret.ProtectedString/issues/42)) ([2174410](https://github.com/Alpaq92/TopSecret.ProtectedString/commit/2174410fa760b8a6b9ab835f0ad89badeaf18f25))
+
 ## [2.7.0](https://github.com/Alpaq92/TopSecret.ProtectedString/compare/v2.6.1...v2.7.0) (2026-10-15)
 
 
