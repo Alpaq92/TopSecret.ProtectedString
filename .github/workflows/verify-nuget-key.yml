@@ -1,0 +1,43 @@
+name: Verify NuGet API key
+
+# Manual probe of the NUGET_API_KEY secret against nuget.org. Uploads a
+# deliberately invalid package: a working key is authenticated and the body
+# rejected with HTTP 400; an expired, revoked or wrongly scoped key is refused
+# with 401/403. Nothing is ever published.
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Probe nuget.org push endpoint
+        shell: bash
+        env:
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "$NUGET_API_KEY" ]; then
+            echo "::error::NUGET_API_KEY secret is empty or unset"
+            exit 1
+          fi
+          printf 'not-a-package' > probe.nupkg
+          code=$(curl -sS -o response.txt -w '%{http_code}' -X PUT \
+            -H "X-NuGet-ApiKey: $NUGET_API_KEY" \
+            -H "X-NuGet-Client-Version: 6.12.0" \
+            -F "package=@probe.nupkg" \
+            https://www.nuget.org/api/v2/package)
+          echo "nuget.org answered HTTP $code"
+          cat response.txt 2>/dev/null || true
+          echo
+          case "$code" in
+            401|403)
+              echo "::error::NUGET_API_KEY is invalid, expired, or lacks push scope for TopSecret.*"
+              exit 1 ;;
+            400)
+              echo "Key accepted by nuget.org; the probe package was rejected as expected." ;;
+            *)
+              echo "::warning::Unexpected status $code; read the response above." ;;
+          esac
