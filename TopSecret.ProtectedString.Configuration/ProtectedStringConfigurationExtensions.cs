@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Globalization;
 using Microsoft.Extensions.Configuration;
 
 namespace TopSecret;
@@ -17,7 +18,8 @@ namespace TopSecret;
 /// section leave the corresponding property at its current value
 /// silently — partial configuration is the common case and is not an
 /// error. Keys *present but malformed* (invalid enum value, malformed
-/// <see cref="TimeSpan"/>, negative <see cref="ProtectedStringOptions.UnwrappedKeyCacheTtl"/>)
+/// <see cref="TimeSpan"/>, negative <see cref="ProtectedStringOptions.UnwrappedKeyCacheTtl"/>,
+/// non-positive <see cref="ProtectedStringOptions.ProcessKeyRotationInterval"/>)
 /// also leave the property unchanged but emit a one-shot
 /// <see cref="Trace.TraceWarning(string)"/> per misconfigured key, so
 /// configuration typos surface in logs without crashing the host at
@@ -26,6 +28,22 @@ namespace TopSecret;
 /// <code>
 /// System.Diagnostics.Trace.Listeners.Add(new System.Diagnostics.ConsoleTraceListener());
 /// </code>
+/// </para>
+/// <para>
+/// <b>Strict enum names.</b> Enum-typed options accept only the
+/// declared member names (case-insensitively). Integer strings such as
+/// <c>"42"</c> and comma-separated combinations such as
+/// <c>"HardwareBackedRequired,GuardedPage"</c> — both of which
+/// <see cref="Enum.TryParse{TEnum}(string, bool, out TEnum)"/> would
+/// otherwise accept and turn into an undefined value — are treated as
+/// malformed and warn-and-skip.
+/// </para>
+/// <para>
+/// <b>Culture-invariant parsing.</b> <see cref="TimeSpan"/> values are
+/// parsed with <see cref="CultureInfo.InvariantCulture"/>, matching the
+/// behaviour of <c>Microsoft.Extensions.Configuration.Binder</c>, so
+/// the same <c>appsettings.json</c> binds identically regardless of the
+/// host's current culture.
 /// </para>
 /// <para>
 /// <b>Read-once vs read-every-time semantics.</b> Three of the five
@@ -63,7 +81,7 @@ public static class ProtectedStringConfigurationExtensions
     /// <paramref name="configuration"/>'s
     /// <see cref="DefaultSectionPath"/> (<c>"TopSecret:ProtectedString"</c>).
     /// Equivalent to
-    /// <c>BindProtectedStringOptions(configuration.GetSection(DefaultSectionPath))</c>.
+    /// <c>configuration.GetSection(DefaultSectionPath).BindProtectedStringOptions()</c>.
     /// </summary>
     /// <param name="configuration">The configuration root.</param>
     /// <exception cref="ArgumentNullException">
@@ -81,11 +99,23 @@ public static class ProtectedStringConfigurationExtensions
     /// configuration layout doesn't match the default
     /// <c>"TopSecret:ProtectedString"</c> path.
     /// </summary>
+    /// <remarks>
+    /// This is an extension method so that
+    /// <c>configuration.GetSection("Crypto:Options").BindProtectedStringOptions()</c>
+    /// resolves here (the more specific parameter type) rather than to
+    /// the <see cref="IConfiguration"/> overload — which, because
+    /// <see cref="IConfigurationSection"/> derives from
+    /// <see cref="IConfiguration"/>, would otherwise be chosen and read
+    /// <c>Crypto:Options:TopSecret:ProtectedString</c>, silently binding
+    /// nothing. The static-call form
+    /// <c>ProtectedStringConfigurationExtensions.BindProtectedStringOptions(section)</c>
+    /// continues to work.
+    /// </remarks>
     /// <param name="section">The section to bind from.</param>
     /// <exception cref="ArgumentNullException">
     /// <paramref name="section"/> is null.
     /// </exception>
-    public static void BindProtectedStringOptions(IConfigurationSection section)
+    public static void BindProtectedStringOptions(this IConfigurationSection section)
     {
         ArgumentNullException.ThrowIfNull(section);
 
@@ -98,7 +128,7 @@ public static class ProtectedStringConfigurationExtensions
 
         if (TryGetTimeSpan(
                 section, nameof(ProtectedStringOptions.UnwrappedKeyCacheTtl),
-                requireNonNegative: true,
+                TimeSpanRange.NonNegative,
                 out var unwrappedKeyCacheTtl))
         {
             ProtectedStringOptions.UnwrappedKeyCacheTtl = unwrappedKeyCacheTtl;
@@ -120,11 +150,35 @@ public static class ProtectedStringConfigurationExtensions
 
         if (TryGetTimeSpan(
                 section, nameof(ProtectedStringOptions.ProcessKeyRotationInterval),
-                requireNonNegative: false,
+                TimeSpanRange.Positive,
                 out var processKeyRotationInterval))
         {
             ProtectedStringOptions.ProcessKeyRotationInterval = processKeyRotationInterval;
         }
+    }
+
+    /// <summary>
+    /// Which range of <see cref="TimeSpan"/> values a property accepts;
+    /// values outside the range warn-and-skip instead of being bound.
+    /// </summary>
+    private enum TimeSpanRange
+    {
+        /// <summary>
+        /// Zero or greater. <see cref="ProtectedStringOptions.UnwrappedKeyCacheTtl"/>
+        /// uses <see cref="TimeSpan.Zero"/> as its "off" switch, so zero
+        /// is a legitimate, meaningful value there.
+        /// </summary>
+        NonNegative,
+
+        /// <summary>
+        /// Strictly greater than zero. The periodic rotation timer behind
+        /// <see cref="ProtectedStringOptions.ProcessKeyRotationInterval"/>
+        /// silently never starts for a non-positive interval, so a zero
+        /// or negative value from configuration is almost certainly a
+        /// mistake and must surface as a warning rather than disable
+        /// rotation without a trace.
+        /// </summary>
+        Positive,
     }
 
     /// <summary>
@@ -138,6 +192,17 @@ public static class ProtectedStringConfigurationExtensions
     /// matters: missing keys are normal in partial configuration; bad
     /// values are usually typos and should surface in logs.
     /// </summary>
+    /// <remarks>
+    /// Values that <see cref="Enum.TryParse{TEnum}(string, bool, out TEnum)"/>
+    /// accepts but that do not name a declared member — integer strings
+    /// (<c>"42"</c>) and comma-separated combinations
+    /// (<c>"HardwareBackedRequired,GuardedPage"</c>, which it bitwise-ORs)
+    /// — are rejected via <see cref="Enum.IsDefined{TEnum}(TEnum)"/>.
+    /// The check happens here, before the
+    /// <see cref="ProtectedStringOptions"/> setter runs, so the binder's
+    /// warn-and-skip contract holds even if the setter itself validates
+    /// and throws.
+    /// </remarks>
     private static bool TryGetEnum<TEnum>(
         IConfigurationSection section,
         string key,
@@ -151,34 +216,36 @@ public static class ProtectedStringConfigurationExtensions
             return false;
         }
 
-        if (Enum.TryParse<TEnum>(raw, ignoreCase: true, out value))
+        if (Enum.TryParse<TEnum>(raw, ignoreCase: true, out value) && Enum.IsDefined(value))
         {
             return true;
         }
 
-        Trace.TraceWarning(
-            $"TopSecret.ProtectedString.Configuration: '{section.Path}:{key}' " +
-            $"has value '{TruncateForLog(raw)}' which is not a valid " +
-            $"{typeof(TEnum).Name} (expected one of: {string.Join(", ", Enum.GetNames(typeof(TEnum)))}). " +
-            $"Skipping; the property keeps its current value.");
+        Warn(section, key, raw,
+            $"is not a valid {typeof(TEnum).Name} " +
+            $"(expected one of: {string.Join(", ", Enum.GetNames<TEnum>())})");
+        value = default;
         return false;
     }
 
     /// <summary>
     /// Reads <paramref name="key"/> from <paramref name="section"/> and
-    /// parses it as a <see cref="TimeSpan"/>. Same skip-on-missing /
+    /// parses it as a <see cref="TimeSpan"/> using
+    /// <see cref="CultureInfo.InvariantCulture"/>. Same skip-on-missing /
     /// warn-on-malformed semantics as
     /// <see cref="TryGetEnum{TEnum}(IConfigurationSection, string, out TEnum)"/>.
-    /// When <paramref name="requireNonNegative"/> is set, a successfully
-    /// parsed but negative value also warns and returns false — the
+    /// A successfully parsed value outside <paramref name="range"/> also
+    /// warns and returns false — the
     /// <see cref="ProtectedStringOptions.UnwrappedKeyCacheTtl"/> setter
     /// throws on negative values, and crashing the host at bind time
-    /// would defeat the point of having a soft binder.
+    /// would defeat the point of having a soft binder; a non-positive
+    /// <see cref="ProtectedStringOptions.ProcessKeyRotationInterval"/>
+    /// would silently disable periodic rotation.
     /// </summary>
     private static bool TryGetTimeSpan(
         IConfigurationSection section,
         string key,
-        bool requireNonNegative,
+        TimeSpanRange range,
         out TimeSpan value)
     {
         var raw = section[key];
@@ -188,28 +255,45 @@ public static class ProtectedStringConfigurationExtensions
             return false;
         }
 
-        if (!TimeSpan.TryParse(raw, out value))
+        if (!TimeSpan.TryParse(raw, CultureInfo.InvariantCulture, out value))
         {
-            Trace.TraceWarning(
-                $"TopSecret.ProtectedString.Configuration: '{section.Path}:{key}' " +
-                $"has value '{TruncateForLog(raw)}' which is not a valid TimeSpan " +
-                $"(expected e.g. '00:00:00.250' or '01:00:00'). " +
-                $"Skipping; the property keeps its current value.");
+            Warn(section, key, raw,
+                "is not a valid TimeSpan (expected e.g. '00:00:00.250' or '01:00:00')");
             return false;
         }
 
-        if (requireNonNegative && value < TimeSpan.Zero)
+        switch (range)
         {
-            Trace.TraceWarning(
-                $"TopSecret.ProtectedString.Configuration: '{section.Path}:{key}' " +
-                $"has negative value '{TruncateForLog(raw)}'; this property does not " +
-                $"accept negative TimeSpans. Skipping; the property keeps its current value.");
-            value = default;
-            return false;
-        }
+            case TimeSpanRange.NonNegative when value < TimeSpan.Zero:
+                Warn(section, key, raw,
+                    "is negative; this property does not accept negative TimeSpans");
+                value = default;
+                return false;
 
-        return true;
+            case TimeSpanRange.Positive when value <= TimeSpan.Zero:
+                Warn(section, key, raw,
+                    "is not positive; this property requires a TimeSpan greater than zero " +
+                    "(a zero or negative interval would silently disable periodic rotation)");
+                value = default;
+                return false;
+
+            default:
+                return true;
+        }
     }
+
+    /// <summary>
+    /// Emits the single warn-and-skip diagnostic every malformed-value
+    /// path shares, so the message shape (package prefix, fully
+    /// qualified key, truncated offending value, reason, and the
+    /// "property keeps its current value" tail) stays identical across
+    /// enum, TimeSpan and range failures.
+    /// </summary>
+    private static void Warn(IConfigurationSection section, string key, string raw, string reason) =>
+        Trace.TraceWarning(
+            $"TopSecret.ProtectedString.Configuration: '{section.Path}:{key}' " +
+            $"has value '{TruncateForLog(raw)}' which {reason}. " +
+            "Skipping; the property keeps its current value.");
 
     /// <summary>
     /// Caps a configuration value at 64 chars in log output so a
