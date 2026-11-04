@@ -122,6 +122,7 @@ internal sealed class LinuxTpmProtector : DisposableKeyAtRestProtector
         }
         catch
         {
+            try { device?.Close(); } catch { }
             try { device?.Dispose(); } catch { }
             return null;
         }
@@ -141,6 +142,7 @@ internal sealed class LinuxTpmProtector : DisposableKeyAtRestProtector
         ArgumentNullException.ThrowIfNull(device);
         if (master.Length != MasterKeySize)
         {
+            try { device.Close(); } catch { }
             try { device.Dispose(); } catch { }
             return null;
         }
@@ -150,6 +152,7 @@ internal sealed class LinuxTpmProtector : DisposableKeyAtRestProtector
         }
         catch
         {
+            try { device.Close(); } catch { }
             try { device.Dispose(); } catch { }
             return null;
         }
@@ -203,6 +206,7 @@ internal sealed class LinuxTpmProtector : DisposableKeyAtRestProtector
                 // Openable a moment ago but TSS could not connect (raced with
                 // another opener on /dev/tpm0, driver hiccup) — try the next
                 // candidate rather than failing on the first.
+                try { device?.Close(); } catch { }
                 try { device?.Dispose(); } catch { }
             }
         }
@@ -385,7 +389,15 @@ internal sealed class LinuxTpmProtector : DisposableKeyAtRestProtector
                 }
             }
             catch { /* best-effort during dispose */ }
-            // Tpm2.Dispose closes the underlying Tpm2Device.
+            // Close the device explicitly BEFORE Tpm2.Dispose. TSS.MSR's
+            // Tpm2Device.Dispose() routes to a base Dispose(bool) that does
+            // nothing; only Close() is guaranteed to release the transport.
+            // LinuxTpmDevice happens to close its FileStream in Dispose(bool)
+            // too, but TcpTpmDevice (the swtpm / simulator transport) tears
+            // its sockets down ONLY in Close(), and a leaked simulator
+            // connection blocks every later client — swtpm serves one TCP
+            // client at a time. Close is idempotent for both device types.
+            try { _tpm._GetUnderlyingDevice()?.Close(); } catch { }
             try { _tpm.Dispose(); } catch { }
         }
     }

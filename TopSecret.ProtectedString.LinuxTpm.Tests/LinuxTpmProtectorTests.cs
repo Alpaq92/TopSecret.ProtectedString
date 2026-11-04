@@ -290,9 +290,18 @@ public class LinuxTpmProtectorTests
         }
 
         public override void Connect() => _inner.Connect();
-        // Tpm2Device.Dispose() is non-virtual and routes through Close(), so
-        // forwarding Close is what releases the wrapped device's sockets.
-        public override void Close() => _inner.Dispose();
+        // TSS.MSR splits teardown in two: Close() releases the transport
+        // (TcpTpmDevice closes its sockets ONLY here), while Dispose() routes
+        // to Dispose(bool), whose base implementation is empty. Forward each
+        // to its counterpart so the protector's "Close, then Dispose" sequence
+        // actually reaches the wrapped socket — a leaked connection wedges
+        // swtpm for every later test (it serves one TCP client at a time),
+        // which is exactly what timed out CI run 41821078364.
+        public override void Close() => _inner.Close();
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) _inner.Dispose();
+        }
         public override bool PlatformAvailable() => _inner.PlatformAvailable();
         public override bool HasRM() => _inner.HasRM();
         public override bool UsesTbs() => _inner.UsesTbs();
