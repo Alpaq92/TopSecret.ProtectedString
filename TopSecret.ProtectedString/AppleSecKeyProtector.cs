@@ -28,35 +28,43 @@ namespace TopSecret;
 /// has no reason to require.
 /// </para>
 /// <para>
-/// Each call to <see cref="UnwrapKey"/> performs a SEP roundtrip via
-/// <c>SecKeyCreateDecryptedData</c>. Per-op latency is platform-dependent —
-/// low single-digit milliseconds on Apple Silicon, more on older A-series
-/// devices. Callers must dispose the returned <see cref="KeyAccessor"/> as
-/// soon as the AES-GCM operation completes; the buffer is zeroed and unlocked
-/// on dispose.
+/// Each call to <see cref="KeyAtRestProtector.UnwrapKey"/> performs a SEP
+/// roundtrip via <c>SecKeyCreateDecryptedData</c>. Per-op latency is
+/// platform-dependent — low single-digit milliseconds on Apple Silicon, more
+/// on older A-series devices. Callers must dispose the returned
+/// <see cref="KeyAccessor"/> as soon as the AES-GCM operation completes; the
+/// buffer is zeroed and unlocked on dispose.
 /// </para>
 /// <para>
 /// When SEP is not available — typically the iOS Simulator on Intel hosts
 /// (simulators on Apple-Silicon hosts do expose a SEP), pre-T1 Intel Macs, or
-/// any non-Apple platform — <see cref="TryCreate"/> returns
+/// any non-Apple platform — <see cref="TryCreate(byte[])"/> returns
 /// <see langword="null"/> and <see cref="KeyAtRestProtectorFactory"/> falls
 /// back to the next tier (obscurity, then no-op) per the configured
 /// <see cref="KeyAtRestProtection"/> policy; <see cref="HardeningPolicy"/>
 /// only governs failures within a tier (e.g. a memory-locking failure), not
 /// the hardware-to-obscurity fallback itself.
 /// </para>
+/// <para>
+/// <b>Accepted residue.</b> The decrypted master transits a
+/// CoreFoundation-owned <c>CFData</c> buffer between
+/// <c>SecKeyCreateDecryptedData</c> and the copy into the locked ephemeral.
+/// That buffer is released (<c>CFRelease</c>) but not zeroed — CoreFoundation
+/// offers no wipe-on-free — so a brief plaintext residue in the malloc heap is
+/// part of this tier's accepted window.
+/// </para>
 /// </remarks>
-internal sealed class AppleSecKeyProtector : KeyAtRestProtector, IDisposable
+internal sealed class AppleSecKeyProtector : DisposableKeyAtRestProtector
 {
-    private const int MasterKeySize = 32;
-
     private readonly IntPtr _privateKeyRef;   // SecKeyRef, retained
     private readonly byte[] _wrappedBlob;
-    private bool _disposed;
 
     // Process-lifetime cache for IsActuallyAvailable().
     // 0 = unknown, 1 = available, 2 = unavailable.
     private static int s_availabilityState;
+
+    private static bool IsApplePlatform =>
+        OperatingSystem.IsMacOS() || OperatingSystem.IsIOS() || OperatingSystem.IsMacCatalyst();
 
     /// <summary>
     /// Attempts to wrap <paramref name="master"/> using a freshly generated
@@ -68,18 +76,8 @@ internal sealed class AppleSecKeyProtector : KeyAtRestProtector, IDisposable
     /// </summary>
     public static AppleSecKeyProtector? TryCreate(byte[] master)
     {
-        if (master.Length != MasterKeySize) return null;
-        if (!OperatingSystem.IsMacOS() && !OperatingSystem.IsIOS() && !OperatingSystem.IsMacCatalyst())
-            return null;
-
-        try
-        {
-            return CreateOrThrow(master);
-        }
-        catch
-        {
-            return null;
-        }
+        if (!IsApplePlatform) return null;
+        return TryCreate(master, CreateOrThrow);
     }
 
     /// <summary>
@@ -99,7 +97,7 @@ internal sealed class AppleSecKeyProtector : KeyAtRestProtector, IDisposable
         var snapshot = Volatile.Read(ref s_availabilityState);
         if (snapshot != 0) return snapshot == 1;
 
-        if (!OperatingSystem.IsMacOS() && !OperatingSystem.IsIOS() && !OperatingSystem.IsMacCatalyst())
+        if (!IsApplePlatform)
         {
             Volatile.Write(ref s_availabilityState, 2);
             return false;
@@ -207,14 +205,12 @@ internal sealed class AppleSecKeyProtector : KeyAtRestProtector, IDisposable
         _wrappedBlob = wrappedBlob;
     }
 
-    public override KeyAccessor UnwrapKey()
+    protected override KeyAccessor UnwrapCore()
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
-
+        // The base's GC.KeepAlive(this) keeps _privateKeyRef alive through the
+        // SEP round-trip, so the finalizer cannot CFRelease it mid-decrypt.
         IntPtr ciphertext = IntPtr.Zero;
         IntPtr decrypted = IntPtr.Zero;
-        byte[]? unwrapped = null;
-        bool ok = false;
         try
         {
             ciphertext = Native.CFDataCreateWithBytes(_wrappedBlob);
@@ -229,46 +225,26 @@ internal sealed class AppleSecKeyProtector : KeyAtRestProtector, IDisposable
             }
 
             int len = checked((int)Native.CFDataGetLength(decrypted));
-            // Best-effort lock + dump-exclude — same policy as the rest of
-            // the hardening surface.
-            unwrapped = ProtectedString.AllocatePinnedBytes(
-                len, excludeFromDumps: true, lockContext: "memory locking unwrapped key");
-
-            Native.CFDataCopyToBuffer(decrypted, unwrapped);
-            ok = true;
-            return KeyAccessor.Ephemeral(unwrapped);
+            unsafe
+            {
+                // Copy straight from the CFData backing store into the locked
+                // ephemeral — no managed intermediate.
+                return EphemeralFrom(new ReadOnlySpan<byte>((void*)Native.CFDataGetBytePtr(decrypted), len));
+            }
         }
         finally
         {
             if (decrypted != IntPtr.Zero) Native.CFRelease(decrypted);
             if (ciphertext != IntPtr.Zero) Native.CFRelease(ciphertext);
-            if (!ok && unwrapped is { Length: > 0 })
-            {
-                CryptographicOperations.ZeroMemory(unwrapped);
-                MemoryLocker.TryUnlock(unwrapped);
-            }
-            // Keeps `this` reachable through the SEP round-trip above, so the
-            // finalizer can never fire (releasing _privateKeyRef out from
-            // under an in-flight decrypt) while UnwrapKey is executing.
-            GC.KeepAlive(this);
         }
     }
 
-    public void Dispose()
+    protected override void ReleaseResources()
     {
-        if (_disposed) return;
+        // CFRelease is a CoreFoundation P/Invoke with no managed re-entry, so
+        // it is safe from the finalizer thread.
         if (_privateKeyRef != IntPtr.Zero) Native.CFRelease(_privateKeyRef);
         CryptographicOperations.ZeroMemory(_wrappedBlob);
-        _disposed = true;
-        GC.SuppressFinalize(this);
-    }
-
-    ~AppleSecKeyProtector()
-    {
-        // Best-effort cleanup if the caller forgot Dispose. CFRelease is a
-        // CoreFoundation P/Invoke with no managed re-entry, so it is safe
-        // from the finalizer thread.
-        try { Dispose(); } catch { /* finalizer must not throw */ }
     }
 
     // ---- Native / CoreFoundation interop -----------------------------
@@ -471,17 +447,8 @@ internal sealed class AppleSecKeyProtector : KeyAtRestProtector, IDisposable
         {
             int len = checked((int)CFDataGetLength(cfData));
             var managed = new byte[len];
-            CFDataCopyToBuffer(cfData, managed);
+            Marshal.Copy(CFDataGetBytePtr(cfData), managed, 0, len);
             return managed;
-        }
-
-        public static void CFDataCopyToBuffer(IntPtr cfData, byte[] destination)
-        {
-            int len = checked((int)CFDataGetLength(cfData));
-            if (destination.Length < len)
-                throw new ArgumentException("destination buffer too small", nameof(destination));
-            IntPtr src = CFDataGetBytePtr(cfData);
-            Marshal.Copy(src, destination, 0, len);
         }
 
         // ---- P/Invoke surface -------------------------------------------

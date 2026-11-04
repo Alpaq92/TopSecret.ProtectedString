@@ -91,11 +91,10 @@ public class KeyAtRestProtectorTests
         }
     }
 
-    // ---- WindowsAesGcmEphemeralProtector -------------------------------
+    // ---- AesGcmWrapProtector (universal obscurity tier) ----------------
 
     [TestFixture]
-    [Platform(Include = "Win")]
-    public class WindowsAesGcmEphemeral
+    public class AesGcmWrap
     {
         [Test]
         public void Round_trips_master()
@@ -103,7 +102,7 @@ public class KeyAtRestProtectorTests
             var master = RandomNumberGenerator.GetBytes(32);
             var expected = master.ToArray();
 
-            var protector = WindowsAesGcmEphemeralProtector.TryCreate(master);
+            var protector = AesGcmWrapProtector.TryCreate(master);
             Assert.That(protector, Is.Not.Null);
 
             using (protector as IDisposable)
@@ -117,7 +116,7 @@ public class KeyAtRestProtectorTests
         public void TryCreate_zeros_input_master()
         {
             var master = RandomNumberGenerator.GetBytes(32);
-            var protector = WindowsAesGcmEphemeralProtector.TryCreate(master);
+            var protector = AesGcmWrapProtector.TryCreate(master);
 
             Assert.That(protector, Is.Not.Null);
             Assert.That(master, Is.All.EqualTo((byte)0),
@@ -129,15 +128,15 @@ public class KeyAtRestProtectorTests
         [Test]
         public void TryCreate_rejects_wrong_size()
         {
-            Assert.That(WindowsAesGcmEphemeralProtector.TryCreate(new byte[16]), Is.Null);
-            Assert.That(WindowsAesGcmEphemeralProtector.TryCreate(new byte[33]), Is.Null);
+            Assert.That(AesGcmWrapProtector.TryCreate(new byte[16]), Is.Null);
+            Assert.That(AesGcmWrapProtector.TryCreate(new byte[33]), Is.Null);
         }
 
         [Test]
         public void UnwrapKey_returns_fresh_buffer_per_call()
         {
             var master = RandomNumberGenerator.GetBytes(32);
-            var protector = WindowsAesGcmEphemeralProtector.TryCreate(master)!;
+            var protector = AesGcmWrapProtector.TryCreate(master)!;
 
             try
             {
@@ -159,9 +158,22 @@ public class KeyAtRestProtectorTests
         public void UnwrapKey_throws_after_dispose()
         {
             var master = RandomNumberGenerator.GetBytes(32);
-            var protector = WindowsAesGcmEphemeralProtector.TryCreate(master)!;
+            var protector = AesGcmWrapProtector.TryCreate(master)!;
             (protector as IDisposable)!.Dispose();
 
+            Assert.Throws<ObjectDisposedException>(() => protector.UnwrapKey());
+        }
+
+        [Test]
+        public void Dispose_is_idempotent_and_thread_safe()
+        {
+            var protector = AesGcmWrapProtector.TryCreate(RandomNumberGenerator.GetBytes(32))!;
+
+            // DisposableKeyAtRestProtector guards Dispose with an Interlocked
+            // flag so ProtectorLifetime.Release / MarkSuperseded racing each
+            // other cannot double-release.
+            Parallel.For(0, 8, _ => protector.Dispose());
+            Assert.DoesNotThrow(() => protector.Dispose());
             Assert.Throws<ObjectDisposedException>(() => protector.UnwrapKey());
         }
     }
@@ -277,6 +289,64 @@ public class KeyAtRestProtectorTests
 
             cache.Dispose();
             Assert.DoesNotThrow(() => cache.Dispose());
+        }
+
+        /// <summary>
+        /// Regression: a TTL beyond the <see cref="Timer"/> horizon
+        /// (<c>&gt; 4294967294 ms</c>) used to make <c>Timer.Change</c> throw
+        /// AFTER <c>_cachedKey</c> and a far-future expiry were already
+        /// published; the cleanup then zeroed the very buffer the cache still
+        /// pointed at, so every later <c>UnwrapKey</c> handed out an all-zero
+        /// key under a stale expiry. Whatever the first call does (throw or
+        /// succeed), a subsequent call must never return an all-zero key.
+        /// </summary>
+        [Test]
+        public void Ttl_beyond_timer_horizon_never_yields_an_all_zero_key()
+        {
+            var master = RandomNumberGenerator.GetBytes(32);
+            var expected = master.ToArray();
+            Assume.That(expected.Any(b => b != 0), Is.True);
+
+            // Noop inner: Persistent accessor over the (pinned by the caller)
+            // master, so the decorator's own copy path is what is under test.
+            var pinnedMaster = GC.AllocateArray<byte>(32, pinned: true);
+            master.CopyTo(pinnedMaster, 0);
+            using var cache = new TtlCachingKeyAtRestProtector(
+                new NoopKeyAtRestProtector(pinnedMaster), TimeSpan.MaxValue);
+
+            try
+            {
+                using var first = cache.UnwrapKey();
+                Assert.That(first.Key, Is.EqualTo(expected),
+                    "if the first unwrap succeeds it must return the real master");
+            }
+            catch (Exception ex) when (ex is not AssertionException)
+            {
+                // Permitted by the contract under test: a throw is acceptable
+                // as long as the cache is left empty rather than poisoned.
+            }
+
+            using var second = cache.UnwrapKey();
+            Assert.Multiple(() =>
+            {
+                Assert.That(second.Key, Is.Not.All.EqualTo((byte)0),
+                    "a subsequent unwrap must never hand out a wiped (all-zero) cached key");
+                Assert.That(second.Key, Is.EqualTo(expected));
+            });
+        }
+
+        [Test]
+        public void Ttl_beyond_timer_horizon_is_still_a_cache_hit_on_second_unwrap()
+        {
+            var master = RandomNumberGenerator.GetBytes(32);
+            var inner = new CountingProtector(master);
+            using var cache = new TtlCachingKeyAtRestProtector(inner, TimeSpan.FromDays(365));
+
+            using (cache.UnwrapKey()) { }
+            using (cache.UnwrapKey()) { }
+
+            Assert.That(inner.UnwrapCount, Is.EqualTo(1),
+                "clamping the wipe timer to the Timer horizon must not shorten the logical TTL");
         }
     }
 

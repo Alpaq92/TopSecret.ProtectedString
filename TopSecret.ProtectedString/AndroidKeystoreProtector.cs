@@ -1,5 +1,4 @@
 #if ANDROID
-using System.Diagnostics;
 using System.Security.Cryptography;
 using Android.App;
 using Android.Provider;
@@ -28,12 +27,13 @@ namespace TopSecret;
 /// is thrown. After generating the wrapping key this provider introspects it
 /// via <see cref="KeyInfo"/> (<c>getSecurityLevel()</c> on API 31+,
 /// <c>isInsideSecureHardware()</c> before that) and refuses software-level
-/// keys: <see cref="TryCreate"/> returns <see langword="null"/> so the
-/// factory falls back per the configured tier policy
+/// keys: <see cref="TryCreate(byte[])"/> returns <see langword="null"/> so
+/// the factory falls back per the configured tier policy
 /// (<see cref="KeyAtRestProtection.HardwareBackedRequired"/> fails closed,
 /// <see cref="KeyAtRestProtection.HardwareBackedPreferred"/> drops to the
-/// obscurity tier), with a one-shot <see cref="Trace.TraceWarning(string)"/>
-/// explaining the demotion. The same residency check backs
+/// obscurity tier), with a one-shot
+/// <see cref="System.Diagnostics.Trace.TraceWarning(string)"/> explaining
+/// the demotion. The same residency check backs
 /// <see cref="IsActuallyAvailable"/>, so
 /// <see cref="ProtectedString.HardwareBackedAvailability"/> agrees with what
 /// construction will actually do.
@@ -52,8 +52,9 @@ namespace TopSecret;
 /// (<c>Settings.Global.BootCount</c>), so constructing a new protector (e.g.
 /// via <see cref="ProtectedString.RotateProcessKey"/>, which never disposes
 /// the protector it supersedes) never invalidates a still-live protector's
-/// key. <see cref="Dispose"/> deletes the instance's own alias; a finalizer
-/// covers the forgot-to-dispose case. Aliases are namespaced per UID, not per
+/// key. <see cref="DisposableKeyAtRestProtector.Dispose"/> deletes the
+/// instance's own alias; the base-class finalizer covers the
+/// forgot-to-dispose case. Aliases are namespaced per UID, not per
 /// process, so on every first construction this provider also sweeps aliases
 /// tagged with an <i>earlier</i> boot session — those can only belong to
 /// processes that no longer exist (Android does not preserve process state
@@ -63,8 +64,18 @@ namespace TopSecret;
 /// reclaimed on the next reboot instead. This also covers upgraders from
 /// versions before 2.0.0, which used a single fixed, unversioned alias.
 /// </para>
+/// <para>
+/// <b>Accepted residue.</b> The master transits the ART heap as a Java
+/// <c>byte[]</c> on both sides of the Binder boundary: the plaintext passed
+/// to <c>Cipher.doFinal</c> at wrap time and the plaintext <c>byte[]</c>
+/// that <c>doFinal</c> returns at unwrap time. The managed-side mirror of
+/// each is zeroed as soon as it has been consumed, but the Java-side copies
+/// are ordinary garbage-collected arrays that cannot be pinned, locked, or
+/// wiped deterministically from .NET. Those two short-lived ART-heap copies
+/// are part of this tier's accepted window.
+/// </para>
 /// </remarks>
-internal sealed class AndroidKeystoreProtector : KeyAtRestProtector, IDisposable
+internal sealed class AndroidKeystoreProtector : DisposableKeyAtRestProtector
 {
     private const string KeystoreName = "AndroidKeyStore";
     private const string AliasPrefix = "TopSecret.ProtectedString.MasterWrap.";
@@ -77,7 +88,6 @@ internal sealed class AndroidKeystoreProtector : KeyAtRestProtector, IDisposable
     private readonly IKey _wrappingKey;
     private readonly byte[] _wrappedBlob;
     private readonly byte[] _iv;
-    private bool _disposed;
 
     // 0 = not yet swept, 1 = swept. CAS'd up front; the sweep predicate
     // (strictly-earlier boot session only) makes the ordering race with a
@@ -92,24 +102,13 @@ internal sealed class AndroidKeystoreProtector : KeyAtRestProtector, IDisposable
     // AppleSecKeyProtector's probe cache. 0 = unknown, 1 = available, 2 = not.
     private static int s_availabilityState;
 
-    public static AndroidKeystoreProtector? TryCreate(byte[] master)
-    {
-        if (master.Length != 32) return null;
-        try
-        {
-            return CreateOrThrow(master);
-        }
-        catch
-        {
-            return null;
-        }
-    }
+    public static AndroidKeystoreProtector? TryCreate(byte[] master) => TryCreate(master, CreateOrThrow);
 
     /// <summary>
     /// Cached probe backing <see cref="ProtectedString.HardwareBackedAvailability"/>:
     /// generates a throwaway Keystore key, verifies hardware residency via the
-    /// same check <see cref="TryCreate"/> applies, and deletes it. Needed
-    /// because the Keystore can silently hand back a software-level key
+    /// same check <see cref="TryCreate(byte[])"/> applies, and deletes it.
+    /// Needed because the Keystore can silently hand back a software-level key
     /// (emulators, hardware-less devices) — a bare "Keystore API exists"
     /// check would report available on hosts where construction then fails
     /// the residency check and falls back.
@@ -122,7 +121,7 @@ internal sealed class AndroidKeystoreProtector : KeyAtRestProtector, IDisposable
         bool available;
         try
         {
-            var probeMaster = new byte[32];
+            var probeMaster = new byte[MasterKeySize];
             using (var probe = CreateOrThrow(probeMaster))
             {
                 available = true;
@@ -177,13 +176,10 @@ internal sealed class AndroidKeystoreProtector : KeyAtRestProtector, IDisposable
             // wrapping anything and let the caller fall back per policy.
             if (!IsHardwareResident(wrappingKey))
             {
-                if (Interlocked.CompareExchange(ref s_warnedSoftwareLevel, 1, 0) == 0)
-                {
-                    Trace.TraceWarning(
-                        "ProtectedString: Android Keystore returned a software-level key " +
-                        "(no hardware keymaster on this device/emulator). The hardware-backed " +
-                        "tier is unavailable; falling back per the configured KeyAtRestProtection policy.");
-                }
+                WarnOnce.Trace(ref s_warnedSoftwareLevel,
+                    "ProtectedString: Android Keystore returned a software-level key " +
+                    "(no hardware keymaster on this device/emulator). The hardware-backed " +
+                    "tier is unavailable; falling back per the configured KeyAtRestProtection policy.");
                 throw new PlatformNotSupportedException(
                     "Android Keystore key is not hardware-resident (software security level).");
             }
@@ -191,6 +187,8 @@ internal sealed class AndroidKeystoreProtector : KeyAtRestProtector, IDisposable
             var cipher = Cipher.GetInstance(Transformation)
                 ?? throw new InvalidOperationException("Cipher.GetInstance(AES/GCM/NoPadding) unavailable.");
             cipher.Init(CipherMode.EncryptMode, wrappingKey);
+            // Accepted residue: the binding marshals `master` into a Java
+            // byte[] on the ART heap for the Binder call (see class remarks).
             var wrappedBlob = cipher.DoFinal(master)
                 ?? throw new InvalidOperationException("Cipher.DoFinal returned null.");
             var iv = cipher.GetIV()
@@ -323,76 +321,46 @@ internal sealed class AndroidKeystoreProtector : KeyAtRestProtector, IDisposable
         _iv = iv;
     }
 
-    public override KeyAccessor UnwrapKey()
+    protected override KeyAccessor UnwrapCore()
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        // The base's GC.KeepAlive(this) keeps `this` reachable through the
+        // Binder round-trip, so the finalizer can never delete the Keystore
+        // alias out from under an in-flight decrypt.
+        var cipher = Cipher.GetInstance(Transformation)
+            ?? throw new InvalidOperationException("Cipher.GetInstance failed during unwrap.");
+        var ivSpec = new GCMParameterSpec(GcmTagBits, _iv);
+        cipher.Init(CipherMode.DecryptMode, _wrappingKey, ivSpec);
+
+        // Accepted residue: DoFinal's plaintext comes back as a Java byte[]
+        // on the ART heap, mirrored into this managed array by the binding
+        // (see class remarks). The managed mirror is wiped below; the Java
+        // copy is left to the ART GC.
+        var unwrapped = cipher.DoFinal(_wrappedBlob)
+            ?? throw new InvalidOperationException("Cipher.DoFinal returned null during unwrap.");
 
         try
         {
-            var cipher = Cipher.GetInstance(Transformation)
-                ?? throw new InvalidOperationException("Cipher.GetInstance failed during unwrap.");
-            var ivSpec = new GCMParameterSpec(GcmTagBits, _iv);
-            cipher.Init(CipherMode.DecryptMode, _wrappingKey, ivSpec);
-
-            var unwrapped = cipher.DoFinal(_wrappedBlob)
-                ?? throw new InvalidOperationException("Cipher.DoFinal returned null during unwrap.");
-
             // Promote into a pinned, locked buffer so the rest of the library
             // can wipe it deterministically. The transient byte[] returned by
             // DoFinal is on the regular managed heap and can move under the GC.
-            var pinned = ProtectedString.AllocatePinnedBytes(
-                unwrapped.Length, excludeFromDumps: true, lockContext: "memory locking unwrapped key");
-
-            bool ok = false;
-            try
-            {
-                unwrapped.CopyTo(pinned, 0);
-                ok = true;
-                return KeyAccessor.Ephemeral(pinned);
-            }
-            finally
-            {
-                CryptographicOperations.ZeroMemory(unwrapped);
-                if (!ok)
-                {
-                    CryptographicOperations.ZeroMemory(pinned);
-                    MemoryLocker.TryUnlock(pinned);
-                }
-            }
+            return EphemeralFrom(unwrapped);
         }
         finally
         {
-            // Keeps `this` reachable through the Binder round-trip above, so
-            // the finalizer can never fire (deleting the Keystore alias out
-            // from under an in-flight decrypt) while UnwrapKey is executing.
-            GC.KeepAlive(this);
+            CryptographicOperations.ZeroMemory(unwrapped);
         }
     }
 
-    public void Dispose()
+    protected override void ReleaseResources()
     {
-        if (_disposed) return;
-        _disposed = true;
         CryptographicOperations.ZeroMemory(_wrappedBlob);
         CryptographicOperations.ZeroMemory(_iv);
         // Delete this instance's own alias — never anyone else's. The key
         // bytes never lived in this process; deletion just retires the
-        // Keystore entry so orphans can't accumulate across rotations.
+        // Keystore entry so orphans can't accumulate across rotations. From
+        // the finalizer this is best-effort; if the process dies before it
+        // runs, the alias is reclaimed by the next reboot's sweep instead.
         try { _keystore.DeleteEntry(_keyAlias); } catch { /* best effort during dispose */ }
-        GC.SuppressFinalize(this);
-    }
-
-    ~AndroidKeystoreProtector()
-    {
-        // Safety net for the two undisposed paths: a protector the caller
-        // forgot to Dispose, and a protector RotateProcessKey superseded
-        // (rotation never disposes the protector it replaces; the rotation
-        // registry holds only WeakReference<ProtectedString>, so the old
-        // protector becomes unreachable and finalizes once nothing still
-        // references it). Deleting its alias here is best-effort; if the
-        // process dies before this runs, the alias is reclaimed by the next
-        // reboot's sweep instead.
-        try { Dispose(); } catch { /* finalizer must not throw */ }
     }
 }
 #endif

@@ -100,6 +100,25 @@ jobs:
         if: matrix.os != 'ubuntu-latest'
         run: dotnet test TopSecret.ProtectedString.Tests/TopSecret.ProtectedString.Tests.csproj --configuration Release --no-build --verbosity normal
 
+      # The rotation-vs-concurrent-ops stress fixture failed exactly once on
+      # this leg (run 41813279078: AuthenticationTagMismatchException on a
+      # freshly constructed instance, 1 in ~6400 ops, never reproduced on x64
+      # Windows/Linux in 25 local runs). Re-running the fixture several times
+      # on the arm64 macOS leg turns a one-in-thousands race into something
+      # this job actually has a chance of catching, and the fixture's failure
+      # message now records protector type, rotation count and the failing
+      # iteration's shape so a recurrence is diagnosable. ~2 s per pass.
+      - name: Stress fixture repeat (macOS arm64 only)
+        if: matrix.os == 'macos-14'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for pass in 1 2 3 4 5 6 7 8; do
+            echo "::group::ConcurrencyStressTests pass $pass"
+            dotnet test TopSecret.ProtectedString.Tests/TopSecret.ProtectedString.Tests.csproj --configuration Release --no-build --filter "FullyQualifiedName~ConcurrencyStressTests"
+            echo "::endgroup::"
+          done
+
       # ProtectedBlob suite: wire-format pinning (golden layouts — a failure
       # is a breaking format change), round-trip boundary sizes, the tamper
       # fail-closed matrix, lifecycle, concurrency, and rotation

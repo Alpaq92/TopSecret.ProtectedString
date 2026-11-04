@@ -4,14 +4,24 @@ using System.Text;
 namespace TopSecret;
 
 /// <summary>
-/// Wraps the master AES key with AES-GCM-256 under a fresh per-protector
-/// random wrap key. The wrap key and the nonce/ciphertext/tag envelope
-/// live in two separately allocated, pinned, locked, dump-excluded
-/// buffers; <see cref="UnwrapKey"/> AES-GCM-decrypts into a third
-/// freshly-allocated pinned/locked buffer that is wiped and unlocked
-/// when the returned <see cref="KeyAccessor"/> is disposed.
+/// Universal software-obscurity wrap: AES-GCM-256 under a fresh
+/// per-protector random wrap key. The wrap key and the
+/// nonce/ciphertext/tag envelope live in two separately allocated, pinned,
+/// locked, dump-excluded buffers; <see cref="KeyAtRestProtector.UnwrapKey"/>
+/// AES-GCM-decrypts into a third freshly-allocated pinned/locked buffer that
+/// is wiped and unlocked when the returned <see cref="KeyAccessor"/> is
+/// disposed.
 /// </summary>
 /// <remarks>
+/// <para>
+/// <b>Platform reach.</b> Nothing here is OS-specific: AES-GCM comes from
+/// <see cref="AesGcmShim"/>, which uses the in-box
+/// <see cref="AesGcm"/> everywhere it is supported and BouncyCastle on
+/// <c>net10.0-browser</c>. The factory therefore selects this protector
+/// for the <see cref="KeyAtRestProtection.Obscurity"/> tier on every
+/// platform, with <see cref="HkdfWrapProtector"/> as the fallback only if
+/// AES-GCM construction declines.
+/// </para>
 /// <para>
 /// <b>Why this beats DPAPI's <c>CryptProtectMemory(SAME_PROCESS)</c>.</b>
 /// DPAPI derives its unwrap key from session state that a public PoC
@@ -27,40 +37,28 @@ namespace TopSecret;
 /// who knows the layout walks the pinned object heap, finds both, and
 /// reverses the AEAD. The win is "no fixed reproducible key", not
 /// "memory-dump-proof"; for the latter, opt into the hardware-backed
-/// tier (Apple SEP / Android Keystore / Windows TPM via the optional
-/// <c>TopSecret.ProtectedString.WindowsTpm</c> NuGet) where the wrap
-/// key lives in a secure element instead of process memory.
+/// tier (Apple SEP / Android Keystore / TPM 2.0 via the optional
+/// <c>TopSecret.ProtectedString.WindowsTpm</c> /
+/// <c>TopSecret.ProtectedString.LinuxTpm</c> NuGets) where the wrap key
+/// lives in a secure element instead of process memory.
 /// </para>
 /// </remarks>
-internal sealed class WindowsAesGcmEphemeralProtector : KeyAtRestProtector, IDisposable
+internal sealed class AesGcmWrapProtector : DisposableKeyAtRestProtector
 {
-    private const int MasterKeySize = 32;
     private const int WrapKeySize = 32;
     private const int NonceSize = 12;
     private const int TagSize = 16;
     private const int EnvelopeSize = NonceSize + MasterKeySize + TagSize;
 
     private static readonly byte[] s_aad =
-        Encoding.UTF8.GetBytes("TopSecret.ProtectedString/WindowsAesGcmEphemeral/v1");
+        Encoding.UTF8.GetBytes("TopSecret.ProtectedString/AesGcmWrap/v1");
 
     private readonly byte[] _wrapKey;
     private readonly byte[] _envelope;
-    private bool _disposed;
 
-    public static WindowsAesGcmEphemeralProtector? TryCreate(byte[] master)
-    {
-        if (master.Length != MasterKeySize) return null;
-        try
-        {
-            return CreateOrThrow(master);
-        }
-        catch
-        {
-            return null;
-        }
-    }
+    public static AesGcmWrapProtector? TryCreate(byte[] master) => TryCreate(master, CreateOrThrow);
 
-    private static WindowsAesGcmEphemeralProtector CreateOrThrow(byte[] master)
+    private static AesGcmWrapProtector CreateOrThrow(byte[] master)
     {
         var wrapKey = ProtectedString.AllocatePinnedBytes(
             WrapKeySize, excludeFromDumps: true, lockContext: "memory locking AES-GCM wrap key");
@@ -82,7 +80,7 @@ internal sealed class WindowsAesGcmEphemeralProtector : KeyAtRestProtector, IDis
             // Master is wrapped; zero the input.
             CryptographicOperations.ZeroMemory(master);
             committed = true;
-            return new WindowsAesGcmEphemeralProtector(wrapKey, envelope);
+            return new AesGcmWrapProtector(wrapKey, envelope);
         }
         finally
         {
@@ -96,53 +94,40 @@ internal sealed class WindowsAesGcmEphemeralProtector : KeyAtRestProtector, IDis
         }
     }
 
-    private WindowsAesGcmEphemeralProtector(byte[] wrapKey, byte[] envelope)
+    private AesGcmWrapProtector(byte[] wrapKey, byte[] envelope)
     {
         _wrapKey = wrapKey;
         _envelope = envelope;
     }
 
-    public override KeyAccessor UnwrapKey()
+    protected override KeyAccessor UnwrapCore()
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        var nonce = _envelope.AsSpan(0, NonceSize);
+        var ciphertext = _envelope.AsSpan(NonceSize, MasterKeySize);
+        var tag = _envelope.AsSpan(NonceSize + MasterKeySize, TagSize);
 
-        var unwrapped = ProtectedString.AllocatePinnedBytes(
-            MasterKeySize, excludeFromDumps: true, lockContext: "memory locking unwrapped key");
-
-        bool ok = false;
+        // Decrypt onto the stack, promote into the locked ephemeral, wipe
+        // the stack copy. The stack residue lives for a few instructions
+        // and is overwritten by the next frame — the same transient window
+        // the HKDF stream and the AES implementation's own temporaries
+        // already occupy.
+        Span<byte> plaintext = stackalloc byte[MasterKeySize];
         try
         {
-            var nonce = _envelope.AsSpan(0, NonceSize);
-            var ciphertext = _envelope.AsSpan(NonceSize, MasterKeySize);
-            var tag = _envelope.AsSpan(NonceSize + MasterKeySize, TagSize);
-
-            AesGcmShim.Decrypt(_wrapKey, nonce, ciphertext, tag, unwrapped, s_aad);
-            ok = true;
-            return KeyAccessor.Ephemeral(unwrapped);
+            AesGcmShim.Decrypt(_wrapKey, nonce, ciphertext, tag, plaintext, s_aad);
+            return EphemeralFrom(plaintext);
         }
         finally
         {
-            if (!ok)
-            {
-                CryptographicOperations.ZeroMemory(unwrapped);
-                MemoryLocker.TryUnlock(unwrapped);
-            }
+            CryptographicOperations.ZeroMemory(plaintext);
         }
     }
 
-    public void Dispose()
+    protected override void ReleaseResources()
     {
-        if (_disposed) return;
         CryptographicOperations.ZeroMemory(_wrapKey);
         CryptographicOperations.ZeroMemory(_envelope);
         MemoryLocker.TryUnlock(_wrapKey);
         MemoryLocker.TryUnlock(_envelope);
-        _disposed = true;
-        GC.SuppressFinalize(this);
-    }
-
-    ~WindowsAesGcmEphemeralProtector()
-    {
-        try { Dispose(); } catch { /* finalizer must not throw */ }
     }
 }

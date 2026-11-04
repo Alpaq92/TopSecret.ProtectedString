@@ -17,13 +17,13 @@ namespace TopSecret;
 /// Unlike <c>System.Text.Json</c>, <c>XmlSerializer</c> / <c>DataContractSerializer</c>
 /// have no per-member converter hook, so this ships as an explicit reader helper
 /// rather than an attribute you decorate a property with. Call
-/// <see cref="ReadElementContent"/> from your own <see cref="XmlReader"/> loop
+/// <see cref="ReadElementContent(XmlReader)"/> from your own <see cref="XmlReader"/> loop
 /// or from inside a type's <c>IXmlSerializable.ReadXml</c>; use the hardened
 /// <see cref="FromXml(Stream, string)"/> / <see cref="FromXml(string, string)"/>
 /// convenience overloads when you just have the document.
 /// </para>
 /// <para>
-/// <b>XXE.</b> <see cref="ReadElementContent"/> reads from a reader <i>you</i>
+/// <b>XXE.</b> <see cref="ReadElementContent(XmlReader)"/> reads from a reader <i>you</i>
 /// create, so <i>you</i> own its <see cref="XmlReaderSettings"/> — configure it
 /// XXE-safe for untrusted input (<see cref="DtdProcessing.Prohibit"/>,
 /// <c>XmlResolver = null</c>). The <see cref="FromXml(Stream, string)"/> /
@@ -39,6 +39,17 @@ namespace TopSecret;
 public static class ProtectedStringXml
 {
     /// <summary>
+    /// Default ceiling on the number of characters an element's content may
+    /// contribute to a <see cref="ProtectedString"/>: 1 Mi chars. A secret
+    /// larger than that is almost certainly a mis-targeted element (a
+    /// certificate body, an embedded file) and would otherwise grow the
+    /// locked, dump-excluded build buffer until the memory-locking policy
+    /// fires. Every reader overload has a sibling taking an explicit
+    /// <c>maxLength</c> for legitimately large values.
+    /// </summary>
+    public const int DefaultMaxLength = 1024 * 1024;
+
+    /// <summary>
     /// Reads the text content of the element the <paramref name="reader"/> is
     /// positioned on into a new read-only <see cref="ProtectedString"/>, with no
     /// managed <see cref="string"/>. An empty element (<c>&lt;x/&gt;</c> or
@@ -52,23 +63,36 @@ public static class ProtectedStringXml
     /// The reader is not positioned on an element, or does not support value
     /// chunking (<see cref="XmlReader.CanReadValueChunk"/> is <see langword="false"/>).
     /// </exception>
-    public static ProtectedString ReadElementContent(XmlReader reader)
+    public static ProtectedString ReadElementContent(XmlReader reader) =>
+        ReadElementContent(reader, DefaultMaxLength);
+
+    /// <summary>
+    /// <see cref="ReadElementContent(XmlReader)"/> with an explicit ceiling on
+    /// the number of characters the element may contribute. Content beyond
+    /// <paramref name="maxLength"/> characters throws
+    /// <see cref="XmlException"/> and the partially built value is wiped.
+    /// </summary>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="maxLength"/> is not positive.</exception>
+    /// <exception cref="XmlException">
+    /// The content exceeds <paramref name="maxLength"/>, or the reader ran out
+    /// of input before the element's end tag (a truncated document from a
+    /// reader that reports <see cref="XmlReader.EOF"/> instead of throwing).
+    /// </exception>
+    public static ProtectedString ReadElementContent(XmlReader reader, int maxLength)
     {
         ArgumentNullException.ThrowIfNull(reader);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maxLength);
         if (reader.NodeType != XmlNodeType.Element)
         {
             throw new InvalidOperationException(
                 $"Reader must be positioned on an element to read its content; it is on {reader.NodeType}.");
         }
 
-        var ps = new ProtectedString();
-        try
+        // ProtectedString.Build disposes (and wipes) the half-built instance
+        // if anything below throws, so no local try/catch is needed here.
+        return ProtectedString.Build(ps =>
         {
-            if (reader.IsEmptyElement)
-            {
-                ps.MakeReadOnly();
-                return ps;
-            }
+            if (reader.IsEmptyElement) return;
             if (!reader.CanReadValueChunk)
             {
                 throw new InvalidOperationException(
@@ -100,6 +124,13 @@ public static class ProtectedStringXml
                             int read;
                             while ((read = reader.ReadValueChunk(buf, 0, buf.Length)) > 0)
                             {
+                                if (ps.Length + read > maxLength)
+                                {
+                                    throw new XmlException(
+                                        $"Element content exceeds the {maxLength}-character ceiling for a " +
+                                        $"{nameof(ProtectedString)}. If the value is legitimately that large, " +
+                                        "use an overload with an explicit maxLength.");
+                                }
                                 ps.AppendChars(buf.AsSpan(0, read));
                             }
                             break;
@@ -114,20 +145,23 @@ public static class ProtectedStringXml
                     }
                     reader.Read(); // advance exactly one node per iteration
                 }
-                ps.MakeReadOnly();
-                return ps;
+
+                // A conformant reader throws XmlException on a truncated
+                // document before we get here; a custom reader that merely
+                // reports EOF would otherwise hand back a silently truncated
+                // secret. Fail closed either way.
+                if (reader.NodeType != XmlNodeType.EndElement)
+                {
+                    throw new XmlException(
+                        "Input ended before the element's end tag; refusing to return a possibly truncated value.");
+                }
             }
             finally
             {
                 CryptographicOperations.ZeroMemory(MemoryMarshal.AsBytes(buf.AsSpan()));
                 ArrayPool<char>.Shared.Return(buf);
             }
-        }
-        catch
-        {
-            ps.Dispose();
-            throw;
-        }
+        });
     }
 
     /// <summary>
@@ -145,15 +179,22 @@ public static class ProtectedStringXml
     /// finds an unprefixed <c>&lt;Password&gt;</c> even under a default
     /// namespace, but not a <i>prefixed</i> <c>&lt;ns:Password&gt;</c> — for
     /// namespaced documents drive your own reader and call
-    /// <see cref="ReadElementContent"/>.
+    /// <see cref="ReadElementContent(XmlReader)"/>.
     /// </remarks>
     /// <exception cref="InvalidOperationException">No element named <paramref name="elementLocalName"/> was found.</exception>
-    public static ProtectedString FromXml(string xml, string elementLocalName)
+    public static ProtectedString FromXml(string xml, string elementLocalName) =>
+        FromXml(xml, elementLocalName, DefaultMaxLength);
+
+    /// <summary>
+    /// <see cref="FromXml(string, string)"/> with an explicit ceiling on the
+    /// element's content length — see <see cref="ReadElementContent(XmlReader, int)"/>.
+    /// </summary>
+    public static ProtectedString FromXml(string xml, string elementLocalName, int maxLength)
     {
         ArgumentNullException.ThrowIfNull(xml);
         using var text = new StringReader(xml);
         using var reader = XmlReader.Create(text, s_xxeSafeSettings);
-        return ReadNamedElement(reader, elementLocalName);
+        return ReadNamedElement(reader, elementLocalName, maxLength);
     }
 
     /// <summary>
@@ -163,14 +204,21 @@ public static class ProtectedStringXml
     /// <see cref="ProtectedString"/> — a true no-managed-string ingress.
     /// </summary>
     /// <exception cref="InvalidOperationException">No element named <paramref name="elementLocalName"/> was found.</exception>
-    public static ProtectedString FromXml(Stream xml, string elementLocalName)
+    public static ProtectedString FromXml(Stream xml, string elementLocalName) =>
+        FromXml(xml, elementLocalName, DefaultMaxLength);
+
+    /// <summary>
+    /// <see cref="FromXml(Stream, string)"/> with an explicit ceiling on the
+    /// element's content length — see <see cref="ReadElementContent(XmlReader, int)"/>.
+    /// </summary>
+    public static ProtectedString FromXml(Stream xml, string elementLocalName, int maxLength)
     {
         ArgumentNullException.ThrowIfNull(xml);
         using var reader = XmlReader.Create(xml, s_xxeSafeSettings);
-        return ReadNamedElement(reader, elementLocalName);
+        return ReadNamedElement(reader, elementLocalName, maxLength);
     }
 
-    private static ProtectedString ReadNamedElement(XmlReader reader, string elementLocalName)
+    private static ProtectedString ReadNamedElement(XmlReader reader, string elementLocalName, int maxLength)
     {
         ArgumentException.ThrowIfNullOrEmpty(elementLocalName);
         if (!reader.ReadToFollowing(elementLocalName))
@@ -178,7 +226,7 @@ public static class ProtectedStringXml
             throw new InvalidOperationException(
                 $"No element named '{elementLocalName}' was found in the XML.");
         }
-        return ReadElementContent(reader);
+        return ReadElementContent(reader, maxLength);
     }
 
     // Shared across both FromXml overloads. XmlReader.Create takes a read-only

@@ -9,8 +9,8 @@ namespace TopSecret.LinuxTpm;
 /// generated inside a Linux TPM 2.0 device via Microsoft TSS.MSR
 /// (<c>Microsoft.TSS</c> on NuGet). The RSA private key never leaves the
 /// TPM; the wrapped master is held in process memory as OAEP-SHA256
-/// ciphertext, and every <see cref="UnwrapKey"/> call performs a TPM
-/// round-trip via <c>RSA_Decrypt</c>.
+/// ciphertext, and every <see cref="KeyAtRestProtector.UnwrapKey"/> call
+/// performs a TPM round-trip via <c>RSA_Decrypt</c>.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -28,17 +28,22 @@ namespace TopSecret.LinuxTpm;
 /// <para>
 /// <b>Device path.</b> Prefers <c>/dev/tpmrm0</c> (the kernel resource
 /// manager — handles transient-slot scheduling for us), falling back to
-/// <c>/dev/tpm0</c> when the resource manager isn't exposed. On most modern
-/// Linux distros (kernel 4.12+ with CONFIG_TCG_TPM2_HMAC), <c>/dev/tpmrm0</c>
-/// is the right path; <c>/dev/tpm0</c> is the raw character device that
-/// requires the caller to manage transient slots manually.
+/// <c>/dev/tpm0</c> when the resource manager isn't exposed <i>or cannot be
+/// opened</i>. <see cref="IsAvailable"/> and <see cref="TryCreate(byte[])"/>
+/// walk the candidates identically — a device that exists but fails to open
+/// (permissions, busy) is skipped by both — so availability never reports
+/// <see langword="true"/> for a device construction then cannot use. On most
+/// modern Linux distros (kernel 4.12+ with CONFIG_TCG_TPM2_HMAC),
+/// <c>/dev/tpmrm0</c> is the right path; <c>/dev/tpm0</c> is the raw
+/// character device that requires the caller to manage transient slots
+/// manually.
 /// </para>
 /// <para>
 /// <b>Permissions.</b> Both device files typically require membership in
 /// the <c>tss</c> group on Debian/Ubuntu or the <c>tpm</c> group on Fedora.
-/// If the process can't open the device, <see cref="IsAvailable"/> returns
-/// <see langword="false"/> and <see cref="TryCreate"/> returns
-/// <see langword="null"/>; under
+/// If the process can't open either device, <see cref="IsAvailable"/>
+/// returns <see langword="false"/> and <see cref="TryCreate(byte[])"/>
+/// returns <see langword="null"/>; under
 /// <see cref="KeyAtRestProtection.HardwareBackedRequired"/> the factory
 /// throws <see cref="PlatformNotSupportedException"/>.
 /// </para>
@@ -49,47 +54,52 @@ namespace TopSecret.LinuxTpm;
 /// owner password, construction will fail; that's a configuration issue
 /// outside the library's scope.
 /// </para>
+/// <para>
+/// <b>Concurrency.</b> A TSS.MSR <see cref="Tpm2"/> is a single
+/// command/response pipe over one device handle and is not thread-safe:
+/// two overlapping commands interleave their bytes on the wire. Every TPM
+/// command this protector issues after construction — <c>RSA_Decrypt</c>
+/// in <see cref="UnwrapCore"/>, <c>FlushContext</c> and the device close in
+/// <see cref="ReleaseResources"/> — is serialised through <c>_tpmGate</c>.
+/// Parallel <see cref="KeyAtRestProtector.UnwrapKey"/> callers therefore
+/// queue on the TPM, which is the device's real throughput limit anyway;
+/// pair with <see cref="ProtectedStringOptions.UnwrappedKeyCacheTtl"/> on
+/// hot paths.
+/// </para>
+/// <para>
+/// <b>Accepted residue.</b> TSS.MSR marshals every command and response
+/// through ordinary managed <c>byte[]</c> buffers it owns: the plaintext
+/// master is serialised into the <c>RSA_Encrypt</c> command buffer at wrap
+/// time, and the <c>RSA_Decrypt</c> response buffer (plus the
+/// <c>byte[]</c> TSS hands back) carries it at unwrap time. The returned
+/// array is zeroed as soon as it has been copied into the locked
+/// ephemeral, but TSS's internal command/response buffers are unpinned,
+/// unlocked heap arrays the library cannot reach or wipe — those transient
+/// copies are part of this tier's accepted window.
+/// </para>
 /// </remarks>
-internal sealed class LinuxTpmProtector : KeyAtRestProtector, IDisposable
+internal sealed class LinuxTpmProtector : DisposableKeyAtRestProtector
 {
-    private const int MasterKeySize = 32;
     private const int RsaKeyBits = 2048;
 
     private static readonly string[] CandidateDevicePaths =
         ["/dev/tpmrm0", "/dev/tpm0"];
 
+    private readonly object _tpmGate = new();
     private readonly Tpm2 _tpm;
     private TpmHandle? _keyHandle;
     private readonly byte[] _wrappedBlob;
-    private bool _disposed;
 
     /// <summary>
     /// Probe whether a Linux TPM 2.0 device is reachable from this process.
     /// Non-destructive — opens and immediately closes the device, does not
-    /// generate a key.
+    /// generate a key. Walks the same candidate list, with the same
+    /// skip-on-open-failure rule, as <see cref="TryCreate(byte[])"/>.
     /// </summary>
     public static bool IsAvailable()
     {
         if (!OperatingSystem.IsLinux()) return false;
-
-        foreach (var path in CandidateDevicePaths)
-        {
-            try
-            {
-                if (!File.Exists(path)) continue;
-                // Try to open the device read-write so we exercise the same
-                // permission check TSS.MSR will hit. If we can open it, we
-                // assume the kernel TPM driver is functional.
-                using var fs = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite);
-                return true;
-            }
-            catch
-            {
-                // Device exists but we can't access it (permission, busy, etc.)
-                // — try the next candidate.
-            }
-        }
-        return false;
+        return OpenableDevicePaths().Any();
     }
 
     /// <summary>
@@ -112,6 +122,7 @@ internal sealed class LinuxTpmProtector : KeyAtRestProtector, IDisposable
         }
         catch
         {
+            try { device?.Close(); } catch { }
             try { device?.Dispose(); } catch { }
             return null;
         }
@@ -121,16 +132,17 @@ internal sealed class LinuxTpmProtector : KeyAtRestProtector, IDisposable
     /// Test-only seam. Builds the protector against an already-connected
     /// <see cref="Tpm2Device"/> — typically a <c>TcpTpmDevice</c> pointing
     /// at a software TPM 2.0 simulator (swtpm). Production code uses
-    /// <see cref="TryCreate"/>, which opens <c>/dev/tpmrm0</c> directly.
-    /// On success the protector takes ownership of the device and disposes
-    /// it as part of <see cref="Dispose"/>; on failure the device is
-    /// disposed before returning <see langword="null"/>.
+    /// <see cref="TryCreate(byte[])"/>, which opens <c>/dev/tpmrm0</c>
+    /// directly. On success the protector takes ownership of the device and
+    /// disposes it as part of <see cref="DisposableKeyAtRestProtector.Dispose"/>;
+    /// on failure the device is disposed before returning <see langword="null"/>.
     /// </summary>
     internal static KeyAtRestProtector? TryCreateWithDevice(byte[] master, Tpm2Device device)
     {
         ArgumentNullException.ThrowIfNull(device);
         if (master.Length != MasterKeySize)
         {
+            try { device.Close(); } catch { }
             try { device.Dispose(); } catch { }
             return null;
         }
@@ -140,26 +152,67 @@ internal sealed class LinuxTpmProtector : KeyAtRestProtector, IDisposable
         }
         catch
         {
+            try { device.Close(); } catch { }
             try { device.Dispose(); } catch { }
             return null;
         }
     }
 
-    private static Tpm2Device OpenLinuxDevice()
+    /// <summary>
+    /// The candidate device paths that exist <i>and</i> can be opened
+    /// read-write by this process, in preference order. Shared by
+    /// <see cref="IsAvailable"/> and <see cref="OpenLinuxDevice"/> so the two
+    /// can never disagree about which device is usable.
+    /// </summary>
+    private static IEnumerable<string> OpenableDevicePaths()
     {
-        string? devicePath = null;
         foreach (var path in CandidateDevicePaths)
         {
-            if (File.Exists(path)) { devicePath = path; break; }
+            if (CanOpenReadWrite(path)) yield return path;
         }
-        if (devicePath is null)
+    }
+
+    private static bool CanOpenReadWrite(string path)
+    {
+        try
         {
-            throw new PlatformNotSupportedException("No TPM 2.0 device found at /dev/tpmrm0 or /dev/tpm0.");
+            if (!File.Exists(path)) return false;
+            // Open the device read-write so we exercise the same permission
+            // check TSS.MSR will hit. The handle is closed before we return —
+            // /dev/tpm0 (the raw device) admits only one opener at a time.
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite);
+            return true;
+        }
+        catch
+        {
+            // Device exists but we can't access it (permission, busy, etc.).
+            return false;
+        }
+    }
+
+    private static Tpm2Device OpenLinuxDevice()
+    {
+        foreach (var path in OpenableDevicePaths())
+        {
+            LinuxTpmDevice? device = null;
+            try
+            {
+                device = new LinuxTpmDevice(path);
+                device.Connect();
+                return device;
+            }
+            catch
+            {
+                // Openable a moment ago but TSS could not connect (raced with
+                // another opener on /dev/tpm0, driver hiccup) — try the next
+                // candidate rather than failing on the first.
+                try { device?.Close(); } catch { }
+                try { device?.Dispose(); } catch { }
+            }
         }
 
-        var device = new LinuxTpmDevice(devicePath);
-        device.Connect();
-        return device;
+        throw new PlatformNotSupportedException(
+            "No accessible TPM 2.0 device at /dev/tpmrm0 or /dev/tpm0.");
     }
 
     /// <summary>
@@ -240,6 +293,8 @@ internal sealed class LinuxTpmProtector : KeyAtRestProtector, IDisposable
 
             // 4. RSA-OAEP encrypt the master under the loaded child key.
             //    label = empty, matches our decrypt path.
+            //    Accepted residue: TSS serialises `master` into its own
+            //    command buffer for the wire (see class remarks).
             byte[] wrapped = tpm.RsaEncrypt(
                 loaded,
                 master,
@@ -279,66 +334,71 @@ internal sealed class LinuxTpmProtector : KeyAtRestProtector, IDisposable
         _wrappedBlob = wrappedBlob;
     }
 
-    public override KeyAccessor UnwrapKey()
+    protected override KeyAccessor UnwrapCore()
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
-
-        // RSA_Decrypt round-trip to the TPM. Returns the plaintext (32-byte
-        // master) in a fresh byte[] which we promote into a pinned, locked
+        // RSA_Decrypt round-trip to the TPM, serialised on _tpmGate: the
+        // Tpm2 pipe is single-command. Returns the plaintext (32-byte master)
+        // in a fresh TSS-owned byte[] which we promote into a pinned, locked
         // buffer matching the contract for hardware-backed protectors.
-        byte[] plaintext = _tpm.RsaDecrypt(
-            _keyHandle!,
-            _wrappedBlob,
-            new SchemeOaep(TpmAlgId.Sha256),
-            Array.Empty<byte>());
+        // Accepted residue: TSS's response buffer also carried it (see class
+        // remarks).
+        byte[] plaintext;
+        lock (_tpmGate)
+        {
+            // Re-check under the gate: ReleaseResources flushes the handle
+            // under the same lock, so a caller that lost the race to a
+            // concurrent Dispose must not issue a command against it.
+            var handle = _keyHandle;
+            ObjectDisposedException.ThrowIf(handle is null, this);
 
-        var pinned = ProtectedString.AllocatePinnedBytes(
-            plaintext.Length, excludeFromDumps: true, lockContext: "memory locking unwrapped key");
+            plaintext = _tpm.RsaDecrypt(
+                handle,
+                _wrappedBlob,
+                new SchemeOaep(TpmAlgId.Sha256),
+                Array.Empty<byte>());
+        }
 
-        bool ok = false;
         try
         {
-            Array.Copy(plaintext, pinned, plaintext.Length);
-            // Wipe the TSS.MSR-allocated plaintext since it lives on the
-            // regular managed heap until the GC reclaims it.
-            CryptographicOperations.ZeroMemory(plaintext);
-            ok = true;
-            return KeyAccessor.Ephemeral(pinned);
+            return EphemeralFrom(plaintext);
         }
         finally
         {
-            if (!ok)
-            {
-                CryptographicOperations.ZeroMemory(pinned);
-                MemoryLocker.TryUnlock(pinned);
-            }
+            // Wipe the TSS.MSR-allocated plaintext since it lives on the
+            // regular managed heap until the GC reclaims it.
+            CryptographicOperations.ZeroMemory(plaintext);
         }
     }
 
-    public void Dispose()
+    protected override void ReleaseResources()
     {
-        if (_disposed) return;
-        _disposed = true;
         CryptographicOperations.ZeroMemory(_wrappedBlob);
-        try
+        // FlushContext is a TPM 2.0 command issued via the TSS pipe; take the
+        // same gate as UnwrapCore so it cannot interleave with an in-flight
+        // RSA_Decrypt. Safe from the finalizer thread — the base class's
+        // GC.KeepAlive guarantees no unwrap is in flight on a finalizable
+        // instance, so the lock is uncontended there.
+        lock (_tpmGate)
         {
-            if (_keyHandle is not null)
+            try
             {
-                _tpm.FlushContext(_keyHandle);
-                _keyHandle = null;
+                if (_keyHandle is not null)
+                {
+                    _tpm.FlushContext(_keyHandle);
+                    _keyHandle = null;
+                }
             }
+            catch { /* best-effort during dispose */ }
+            // Close the device explicitly BEFORE Tpm2.Dispose. TSS.MSR's
+            // Tpm2Device.Dispose() routes to a base Dispose(bool) that does
+            // nothing; only Close() is guaranteed to release the transport.
+            // LinuxTpmDevice happens to close its FileStream in Dispose(bool)
+            // too, but TcpTpmDevice (the swtpm / simulator transport) tears
+            // its sockets down ONLY in Close(), and a leaked simulator
+            // connection blocks every later client — swtpm serves one TCP
+            // client at a time. Close is idempotent for both device types.
+            try { _tpm._GetUnderlyingDevice()?.Close(); } catch { }
+            try { _tpm.Dispose(); } catch { }
         }
-        catch { /* best-effort during dispose */ }
-        // Tpm2.Dispose closes the underlying Tpm2Device.
-        try { _tpm.Dispose(); } catch { }
-        GC.SuppressFinalize(this);
-    }
-
-    ~LinuxTpmProtector()
-    {
-        // Bound TPM transient-slot exhaustion when the caller forgets
-        // Dispose. FlushContext is a TPM 2.0 command issued via the TSS
-        // pipe; safe from the finalizer thread.
-        try { Dispose(); } catch { /* finalizer must not throw */ }
     }
 }
