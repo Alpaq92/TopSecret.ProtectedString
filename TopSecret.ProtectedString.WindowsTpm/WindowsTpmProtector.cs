@@ -3,50 +3,10 @@ using System.Security.Cryptography;
 using System.Text;
 using TopSecret;
 
-// CA1416: every NCrypt call site below is runtime-guarded by either
-// OperatingSystem.IsWindows() at the public entry point or by the call
-// graph from those entry points. The analyzer cannot prove it across
-// helper boundaries, so we suppress at file scope.
 #pragma warning disable CA1416
 
 namespace TopSecret.WindowsTpm;
 
-/// <summary>
-/// Wraps the per-process AES master key with an ephemeral RSA-2048 keypair
-/// generated inside the TPM via the CNG <c>NCrypt</c> API and the
-/// <i>Microsoft Platform Crypto Provider</i>. The RSA private key never
-/// leaves the TPM; the wrapped master is held in process memory as
-/// OAEP-SHA256 ciphertext, and every <see cref="KeyAtRestProtector.UnwrapKey"/>
-/// call performs a TPM round-trip via <c>NCryptDecrypt</c>.
-/// </summary>
-/// <remarks>
-/// <para>
-/// Registered with the main <see cref="KeyAtRestProtectorFactory"/> by
-/// <see cref="ModuleInit"/> at assembly load. Consumers do not need to call
-/// anything explicit — referencing the
-/// <c>TopSecret.ProtectedString.WindowsTpm</c> NuGet is enough.
-/// </para>
-/// <para>
-/// <b>Per-op cost.</b> TPM 2.0 RSA-2048 decrypt is typically ~5–15 ms on a
-/// discrete TPM and ~1–3 ms on Intel PTT / AMD fTPM. Set
-/// <see cref="ProtectedStringOptions.UnwrappedKeyCacheTtl"/> to amortise the
-/// round-trip on hot paths.
-/// </para>
-/// <para>
-/// The keypair is created without a name (ephemeral): when the
-/// <see cref="WindowsTpmProtector"/> instance is disposed (typically on
-/// process exit, or at the end of a <see cref="ProtectedString.RotateProcessKey"/>
-/// pass), <c>NCryptFreeObject</c> on the key handle releases the TPM's
-/// reference and the keypair becomes unreachable. The base-class finalizer
-/// covers the case where a protector becomes unreachable without explicit
-/// <see cref="DisposableKeyAtRestProtector.Dispose"/> — for instance, an
-/// old protector orphaned by process-key rotation under
-/// <see cref="ProcessKeyRotation.Periodic"/>. Without it, repeated
-/// rotations would exhaust TPM transient slots (commodity TPMs hold ≤3,
-/// enterprise TPMs 4–8) and subsequent <c>NCryptCreatePersistedKey</c>
-/// calls would fail with <c>TPM_RC_RESOURCES (0x80284001)</c>.
-/// </para>
-/// </remarks>
 internal sealed class WindowsTpmProtector : DisposableKeyAtRestProtector
 {
     private const string PlatformProvider = "Microsoft Platform Crypto Provider";
@@ -60,11 +20,6 @@ internal sealed class WindowsTpmProtector : DisposableKeyAtRestProtector
     // SECURITY_STATUS / NTSTATUS success.
     private const int ErrorSuccess = 0;
 
-    // Cached UTF-16LE bytes of the OAEP hash algorithm name with NUL terminator.
-    // BCRYPT_OAEP_PADDING_INFO.pszAlgId is a LPCWSTR, so we hand NCrypt a
-    // pinned pointer into this array on every Encrypt / Decrypt without
-    // reallocating per call. Allocated on the pinned object heap so the GC
-    // never relocates it; we can take its address with no GCHandle pin.
     private static readonly byte[] s_oaepAlgIdUtf16 = AllocatePinnedAlgId();
 
     private static byte[] AllocatePinnedAlgId()
@@ -80,11 +35,6 @@ internal sealed class WindowsTpmProtector : DisposableKeyAtRestProtector
     private nint _hKey;
     private readonly byte[] _wrappedBlob;
 
-    /// <summary>
-    /// Reports whether the Microsoft Platform Crypto Provider can be opened
-    /// on the current host. Non-destructive — opens and immediately closes
-    /// the provider, does not generate a key.
-    /// </summary>
     public static bool IsAvailable()
     {
         if (!OperatingSystem.IsWindows()) return false;
@@ -102,12 +52,6 @@ internal sealed class WindowsTpmProtector : DisposableKeyAtRestProtector
         }
     }
 
-    /// <summary>
-    /// Builds a TPM-backed protector wrapping <paramref name="master"/>. On
-    /// success the master array is zeroed in place and ownership transfers
-    /// to the returned protector. Returns <see langword="null"/> on any
-    /// failure (TPM unavailable, NCrypt error) so the factory can fall back.
-    /// </summary>
     public static KeyAtRestProtector? TryCreate(byte[] master)
     {
         if (!OperatingSystem.IsWindows()) return null;
@@ -138,10 +82,6 @@ internal sealed class WindowsTpmProtector : DisposableKeyAtRestProtector
 
             byte[] wrapped = EncryptOaep(hKey, master);
 
-            // Master is now wrapped under a TPM-resident private key. Zero
-            // the input array; the only places the master plaintext exists
-            // from here on are inside the TPM and inside transient unwrap
-            // buffers that callers immediately dispose.
             CryptographicOperations.ZeroMemory(master);
 
             var protector = new WindowsTpmProtector(hProvider, hKey, wrapped);
@@ -168,9 +108,6 @@ internal sealed class WindowsTpmProtector : DisposableKeyAtRestProtector
             cbLabel = 0,
         };
 
-        // RSA-2048 OAEP encryption of a 32-byte plaintext yields a 256-byte
-        // ciphertext, but ask NCrypt rather than hard-code in case of
-        // provider variance.
         int status = NCryptEncrypt(hKey, master, master.Length, ref paddingInfo,
             null, 0, out int requiredLen, NCRYPT_PAD_OAEP_FLAG);
         ThrowIfNCryptFailed(status, "NCryptEncrypt size probe failed.");
@@ -209,10 +146,6 @@ internal sealed class WindowsTpmProtector : DisposableKeyAtRestProtector
             null, 0, out int requiredLen, NCRYPT_PAD_OAEP_FLAG);
         ThrowIfNCryptFailed(status, "NCryptDecrypt size probe failed.");
 
-        // NCrypt decrypts into a staging buffer sized to its reported
-        // maximum; it is pinned + locked so the plaintext never lands on an
-        // unlocked page, then trimmed into the right-sized ephemeral and
-        // wiped regardless of outcome.
         var staging = ProtectedString.AllocatePinnedBytes(
             requiredLen, excludeFromDumps: true, lockContext: "memory locking unwrapped key");
         try
@@ -244,11 +177,6 @@ internal sealed class WindowsTpmProtector : DisposableKeyAtRestProtector
     {
         if (status == ErrorSuccess) return;
 
-        // NCrypt returns SECURITY_STATUS values which are HRESULTs (e.g.
-        // NTE_BAD_KEYSET = 0x80090016), not Win32 error codes.
-        // Marshal.GetExceptionForHR renders the canonical HRESULT message;
-        // chain it as the inner so the caller gets both our context and
-        // the system text.
         var inner = Marshal.GetExceptionForHR(status);
         throw new InvalidOperationException(
             $"{message} (HRESULT 0x{status:X8}).",

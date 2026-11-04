@@ -105,10 +105,6 @@ public class ProtectedStringTests
     [Test]
     public void Access_buffer_is_pinned_during_callback()
     {
-        // GC.AllocateArray<>(pinned: true) places the array on the POH (pinned
-        // object heap) so GetGCMemoryInfo will not relocate it. We verify the
-        // buffer is truly pinned by checking that GC.GetGeneration returns 2
-        // (POH objects are reported as gen 2 in .NET 8).
         using var ps = new ProtectedString("topsecret".AsSpan());
 #pragma warning disable CS0618 // intentional: GC.GetGeneration(plain) takes object, which forces the char[] overload
         ps.Access(plain =>
@@ -277,11 +273,6 @@ public class ProtectedStringTests
 
     // ---- Argon2id-based credential verification ------------------------
 
-    /// <summary>
-    /// Argon2id is intentionally slow; tests use the absolute-minimum
-    /// parameters that the algorithm allows so the suite stays fast.
-    /// Production code should use the OWASP-aligned defaults.
-    /// </summary>
     private const int FastIterations = 1;
     private const int FastMemoryKb = 8;
     private const int FastParallelism = 1;
@@ -477,11 +468,6 @@ public class ProtectedStringTests
     [Test]
     public void KeyAtRestProtection_option_round_trips_all_values()
     {
-        // Property round-trip only — the actual protector chosen depends on
-        // when the lazy initializer first runs, so this fixture cannot
-        // exercise the per-tier paths in-process. End-to-end coverage of the
-        // wrapping tiers lives in the factory-coverage and guarded-page
-        // fixtures, which drive KeyAtRestProtectorFactory.Create directly.
         var prior = ProtectedStringOptions.KeyAtRestProtection;
         try
         {
@@ -548,10 +534,6 @@ public class ProtectedStringTests
     [Test]
     public void HardwareBackedAvailability_reports_known_state_for_this_host()
     {
-        // The probe is non-destructive and based on platform + registry.
-        // On the test host (a Windows or Linux dev box without the optional
-        // TopSecret.ProtectedString.WindowsTpm package referenced) the answer
-        // should be NoProviderForThisPlatform; on Apple it should be Available.
         var probe = ProtectedString.HardwareBackedAvailability;
         if (OperatingSystem.IsMacOS() || OperatingSystem.IsIOS() || OperatingSystem.IsMacCatalyst())
         {
@@ -568,22 +550,12 @@ public class ProtectedStringTests
     [Test]
     public void HardwareBackedRequired_throws_when_no_provider_is_available()
     {
-        // Skip on platforms where a built-in provider is available, since
-        // the lazy global protector may already have initialised under a
-        // prior policy and we cannot redo the choice for this process.
         if (OperatingSystem.IsMacOS() || OperatingSystem.IsIOS() || OperatingSystem.IsMacCatalyst())
         {
             Assert.Ignore("Built-in Apple SEP provider is available; this test only covers the Required-failure path.");
             return;
         }
 
-        // We can't actually exercise construction with HardwareBackedRequired
-        // here, because the global protector is initialised lazily on the
-        // first ProtectedString construction in the process and other tests
-        // have already triggered it under None. This test instead asserts
-        // the documented contract by inspection of the availability probe:
-        // when the probe says NoProviderForThisPlatform, a fresh process
-        // configured with HardwareBackedRequired would throw.
         Assert.That(ProtectedString.HardwareBackedAvailability,
             Is.EqualTo(HardwareBackedAvailability.NoProviderForThisPlatform),
             "On a non-Apple host without the optional Windows TPM package, no hardware-backed " +
@@ -699,30 +671,6 @@ public class ProtectedStringTests
         }
     }
 
-    /// <summary>
-    /// Regression test for the <see cref="System.Diagnostics.Trace.TraceWarning(string)"/>
-    /// emitted by <c>RotateInternal</c> when one or more per-instance migrations
-    /// throw. The warning is the operator's only signal that a rotation pass
-    /// did not fully migrate every live instance — without it, a partial
-    /// rotation would land silently and the affected instances would still
-    /// reference the previous master.
-    /// </summary>
-    /// <remarks>
-    /// To trigger the failure deterministically, we (a) construct a normal
-    /// instance under whatever the current process protector is, then
-    /// (b) reflection-swap both the instance's <c>_instanceProtector</c>
-    /// and the global <c>s_keyProtector</c> to the same
-    /// <c>AlwaysThrowingProtector</c>. This keeps the reference-equality
-    /// check inside <c>RotateInternal.toMigrate</c> happy so our instance
-    /// is actually selected for migration, and the migration's
-    /// <c>DecryptInto</c> call then throws on <c>UnwrapKey</c>.
-    /// The original <c>s_keyProtector</c> is restored in <c>finally</c>
-    /// so subsequent tests are not affected. <see cref="NonParallelizableAttribute"/>
-    /// because the test mutates process-wide
-    /// <see cref="System.Diagnostics.Trace.Listeners"/>,
-    /// <see cref="ProtectedStringOptions.ProcessKeyRotationPolicy"/>, and
-    /// the static protector slot.
-    /// </remarks>
     [Test]
     [NonParallelizable]
     public void RotateProcessKey_emits_trace_warning_when_an_instance_migration_fails()
@@ -737,15 +685,8 @@ public class ProtectedStringTests
 
             using var ps = new ProtectedString("rotation-fail-test".AsSpan());
 
-            // Capture s_keyProtector AFTER construction (which lazily
-            // initialises it). We restore this exact reference at end so
-            // tests running after us see the protector they expect.
             priorKeyProtector = TestAccessors.GetProcessKeyProtector();
 
-            // Both refs must point at the SAME throwing instance: the
-            // migration only enrolls instances whose _instanceProtector is
-            // reference-equal to the rotation's oldProtector (which is
-            // s_keyProtector at rotation start).
             var throwing = new AlwaysThrowingProtector();
             TestAccessors.SetInstanceProtector(ps, throwing);
             TestAccessors.SetProcessKeyProtector(throwing);
@@ -768,10 +709,6 @@ public class ProtectedStringTests
         {
             Trace.Listeners.Remove(listener);
             listener.Dispose();
-            // Restore the protector slot so any test running after us sees
-            // a working protector. RotateProcessKey replaced s_keyProtector
-            // with a fresh noop; that fresh noop is also fine, but we
-            // prefer to put back exactly what was there before.
             if (priorKeyProtector is not null)
             {
                 TestAccessors.SetProcessKeyProtector(priorKeyProtector);

@@ -3,12 +3,6 @@ using TopSecret;
 
 namespace TopSecret.ProtectedStringTests;
 
-/// <summary>
-/// Exercises the <see cref="KeyAtRestProtection.GuardedPage"/> tier end to end
-/// through the factory: the master round-trips through a no-access page, the
-/// input is consumed, disposal is clean, and the tier degrades to obscurity
-/// only where page protection is unavailable.
-/// </summary>
 [TestFixture]
 [NonParallelizable]
 public class PageGuardedKeyProtectorTests
@@ -64,9 +58,6 @@ public class PageGuardedKeyProtectorTests
     [Test]
     public void GuardedPage_selects_the_guarded_protector_where_page_protection_exists()
     {
-        // Every CI/dev platform for this TFM (Windows, Linux, macOS) has a
-        // page-protection primitive; browser-wasm (which does not) degrades to
-        // obscurity instead and is out of scope for this fixture.
         Assume.That(MemoryProtectionIsSupported(), Is.True,
             "no page-protection primitive on this platform — GuardedPage degrades to obscurity");
 
@@ -148,9 +139,6 @@ public class PageGuardedKeyProtectorTests
 
     private static bool MemoryProtectionIsSupported()
     {
-        // MemoryProtection is internal; reach it via the same InternalsVisibleTo
-        // seam the rest of the fixture uses. Reflection keeps the test off a
-        // hard reference to the type name in more than one place.
         var t = typeof(ProtectedString).Assembly.GetType("TopSecret.MemoryProtection")!;
         var prop = t.GetProperty("IsSupported",
             System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)!;

@@ -3,12 +3,6 @@ using TopSecret;
 
 namespace TopSecret.ProtectedBlobTests;
 
-/// <summary>
-/// Freezes <see cref="ChunkFormat"/>'s byte-level wire format. A failure in
-/// this fixture means the chunk envelope format changed — that is a BREAKING
-/// FORMAT CHANGE for TopSecret.ProtectedBlob and requires a new magic value
-/// ("TPB2"), not an edit to these expectations.
-/// </summary>
 [TestFixture]
 public class WireFormatPinningTests
 {
@@ -65,13 +59,6 @@ public class WireFormatPinningTests
         }), "DEK-wrap AAD layout changed — breaking format change.");
     }
 
-    /// <summary>
-    /// Pins the full frame construction against an independent in-test
-    /// build of the same format straight on top of the in-box
-    /// <see cref="AesGcm"/>: same key, hand-assembled nonce and AAD, and the
-    /// ciphertext ‖ tag frame layout. If <see cref="ChunkFormat"/> drifts in
-    /// any byte, the two disagree.
-    /// </summary>
     [Test]
     public void EncryptChunk_Frame_Matches_Independent_Reference_Construction()
     {

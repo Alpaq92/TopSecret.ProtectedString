@@ -5,16 +5,6 @@ using TopSecret;
 
 namespace TopSecret.ProtectedStringTests;
 
-/// <summary>
-/// Coverage-focused tests for defensive edge paths that the happy-path suites
-/// never reach: the <see cref="MemoryLockingFailureBehavior.Throw"/> arm of
-/// <see cref="HardeningPolicy"/>, the fault-cleanup branches in
-/// <see cref="TtlCachingKeyAtRestProtector"/> and
-/// <see cref="HkdfWrapProtector"/>, and the <see cref="HkdfWrapProtector"/>
-/// finalizer safety net. All tests are cross-platform (no OS-specific
-/// primitives are forced to fail); faults are injected instance-locally so no
-/// process-global state is left mutated.
-/// </summary>
 public class ProtectorEdgePathCoverageTests
 {
     // ---- HardeningPolicy -------------------------------------------------
@@ -27,10 +17,6 @@ public class ProtectorEdgePathCoverageTests
         [Test]
         public void OnFailure_throws_PlatformNotSupported_when_behavior_is_Throw()
         {
-            // MemoryLockingFailureBehavior is not a read-once option — it is
-            // re-read on every OnFailure call — so flipping it here and
-            // restoring in finally is safe (same idiom as
-            // ProtectedStringTests.MemoryLocking_option_round_trips).
             var prior = ProtectedStringOptions.MemoryLockingFailureBehavior;
             ProtectedStringOptions.MemoryLockingFailureBehavior = MemoryLockingFailureBehavior.Throw;
             try
@@ -70,11 +56,6 @@ public class ProtectorEdgePathCoverageTests
     [TestFixture]
     public class TtlCachingRefreshFault
     {
-        /// <summary>
-        /// Minimal inner protector; Persistent means its accessor's Dispose is
-        /// a no-op, matching the CountingProtector idiom in
-        /// <see cref="KeyAtRestProtectorTests"/>.
-        /// </summary>
         private sealed class StubProtector : KeyAtRestProtector
         {
             private readonly byte[] _master;
@@ -82,22 +63,12 @@ public class ProtectorEdgePathCoverageTests
             public override KeyAccessor UnwrapKey() => KeyAccessor.Persistent(_master);
         }
 
-        // Exercises the !ok cleanup in TtlCachingKeyAtRestProtector.Refresh when
-        // arming the wipe timer throws after the fresh buffer was already
-        // populated — and that the failed refresh leaves the cache EMPTY (the
-        // next call retries the inner protector) rather than pointing at the
-        // wiped buffer.
         [Test]
         public void Refresh_wipes_and_unlocks_fresh_buffer_when_timer_arming_throws()
         {
             var master = RandomNumberGenerator.GetBytes(32);
             var inner = new StubProtector(master);
 
-            // The factory validates UnwrappedKeyCacheTtl >= 0 but the decorator
-            // constructor does not; Timer.Change rejects dueTime < -1 ms with
-            // ArgumentOutOfRangeException. A -2 ms TTL is therefore a purely
-            // instance-local fault injection that fires after Array.Copy
-            // succeeded, driving the uncommitted-cleanup finally in Refresh.
             var cache = new TtlCachingKeyAtRestProtector(inner, TimeSpan.FromMilliseconds(-2));
             try
             {
@@ -113,9 +84,6 @@ public class ProtectorEdgePathCoverageTests
             }
         }
 
-        // Exercises TtlCachingKeyAtRestProtector.cs Dispose hygiene after a failed
-        // Refresh left a populated-then-wiped cache buffer behind (WipeCachedLocked
-        // with a non-null _cachedKey, idempotent double-Dispose, post-Dispose throw).
         [Test]
         public void Dispose_after_failed_refresh_is_clean_and_idempotent()
         {
@@ -137,10 +105,6 @@ public class ProtectorEdgePathCoverageTests
     [TestFixture]
     public class HkdfWrapFaultPaths
     {
-        // CreateOrThrow and the (wrapKey, wrappedMaster) constructor are private,
-        // so — as with TestAccessors — reflection is the sanctioned bypass. Both
-        // lookups throw eagerly so a rename in the main package fails this fixture
-        // loudly instead of silently skipping coverage.
         private static readonly MethodInfo s_createOrThrow =
             typeof(HkdfWrapProtector).GetMethod("CreateOrThrow",
                 BindingFlags.Static | BindingFlags.NonPublic)
@@ -161,10 +125,6 @@ public class ProtectorEdgePathCoverageTests
         [Test]
         public void CreateOrThrow_cleans_up_locked_buffers_when_wrap_faults_mid_flight()
         {
-            // TryCreate's length gate returns null before CreateOrThrow runs, so
-            // a short master can only reach CreateOrThrow via reflection. The XOR
-            // loop then faults at index 15, driving the uncommitted-cleanup
-            // finally (zero + unlock of wrapKey and wrapped).
             var shortMaster = new byte[15];
             var ex = Assert.Throws<TargetInvocationException>(
                 () => s_createOrThrow.Invoke(null, new object[] { shortMaster }));
@@ -172,9 +132,6 @@ public class ProtectorEdgePathCoverageTests
                 "the mid-wrap fault should surface from the XOR loop");
         }
 
-        // Exercises HkdfWrapProtector.UnwrapCore's fault path: the XOR loop
-        // throws before the locked ephemeral is allocated, and the stack
-        // plaintext is wiped by the enclosing finally.
         [Test]
         public void UnwrapKey_cleans_up_ephemeral_buffer_when_unwrap_faults_mid_flight()
         {
@@ -206,9 +163,6 @@ public class ProtectorEdgePathCoverageTests
         {
             var weak = CreateUnreferencedProtector();
 
-            // The finalizer runs on the first Collect + WaitForPendingFinalizers
-            // cycle once the protector is unreachable; the following Collect then
-            // reclaims the object, which is what the weak reference observes.
             for (int i = 0; i < 10 && weak.IsAlive; i++)
             {
                 GC.Collect();

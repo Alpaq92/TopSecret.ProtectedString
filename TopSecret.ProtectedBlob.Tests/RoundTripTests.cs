@@ -201,7 +201,6 @@ public class FromStreamTests
 {
     private const int SmallChunk = ProtectedBlob.MinChunkSize;
 
-    /// <summary>Non-seekable, unknown-length wrapper — the hostile end of the Stream contract, plus single-byte reads to exercise the fill loop.</summary>
     private sealed class NonSeekableStream(byte[] content) : Stream
     {
         private readonly MemoryStream _inner = new(content);

@@ -6,30 +6,6 @@ using TopSecret;
 
 namespace TopSecret.ProtectedStringTests;
 
-/// <summary>
-/// The authoritative "no residue after dispose" check: construct a secret with
-/// a high-entropy marker, dispose it, force a GC, then write a full-memory
-/// crash dump of this process and assert the marker's plaintext is <b>absent</b>
-/// from the dump file — while a plain managed <see cref="string"/> control with
-/// a different marker <b>is</b> found, proving the dump and the scanner work.
-/// </summary>
-/// <remarks>
-/// <para>
-/// <see cref="ExplicitAttribute"/> and Windows-gated: it runs only when
-/// selected by name and only where a dump primitive is present
-/// (<c>MiniDumpWriteDump</c> from <c>dbghelp.dll</c>). The Linux/macOS
-/// equivalent (<c>createdump</c> / <c>gcore</c>) is a separate external tool;
-/// a CI leg that has one can add a sibling.
-/// </para>
-/// <para>
-/// <b>Why the marker never pollutes the dump.</b> The secret is derived from a
-/// small integer seed into a <see cref="char"/>[] that is wiped immediately,
-/// and the value only ever enters a <see cref="ProtectedString"/> (encrypted at
-/// rest, wiped on dispose) — it is never a managed <see cref="string"/>. The
-/// scan needle is re-derived from the seed <i>after</i> the dump snapshot is
-/// taken, so it is not present in memory at dump time.
-/// </para>
-/// </remarks>
 [TestFixture]
 [Explicit("writes a full-memory self-dump; run on demand where a dump primitive exists")]
 public class DumpResidueTests
@@ -86,7 +62,7 @@ public class DumpResidueTests
         }
         finally
         {
-            try { File.Delete(dumpPath); } catch { /* best effort */ }
+            try { File.Delete(dumpPath); } catch { }
         }
     }
 

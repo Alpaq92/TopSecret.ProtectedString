@@ -3,57 +3,6 @@ using System.Security.Cryptography;
 
 namespace TopSecret;
 
-/// <summary>
-/// Wraps the per-process AES master key with an EC P-256 key generated inside
-/// the Apple Secure Enclave (<c>kSecAttrTokenIDSecureEnclave</c>) using
-/// ECIES-AES-GCM (<c>kSecKeyAlgorithmECIESEncryptionCofactorVariableIVX963SHA256AESGCM</c>
-/// — the variable-IV variant Apple recommends; the older fixed-IV forms are
-/// documented as legacy in <c>SecKey.h</c>). The SEP-resident private key
-/// never enters process memory; only its reference (<c>SecKeyRef</c>) and
-/// the wrapped ciphertext blob are held in the .NET heap.
-/// </summary>
-/// <remarks>
-/// <para>
-/// The key is generated with a <c>SecAccessControl</c> of
-/// <c>kSecAccessControlPrivateKeyUsage</c> +
-/// <c>kSecAttrAccessibleAlwaysThisDeviceOnly</c> — the access control Apple
-/// documents for SEP private-key operations, with an accessibility class
-/// that carries no unlock-state requirement. <c>privateKeyUsage</c> adds no
-/// user prompts (no biometric/PIN flags). The key is never persisted
-/// (<c>kSecAttrIsPermanent: false</c> — it lives only in process memory and
-/// dies with the process), so none of the data-at-rest accessibility classes
-/// apply; <c>AfterFirstUnlock</c> in particular would make SEP key generation
-/// fail for any process that runs before the device's first unlock since
-/// boot (background app launches, VoIP/push wake-ups), which this library
-/// has no reason to require.
-/// </para>
-/// <para>
-/// Each call to <see cref="KeyAtRestProtector.UnwrapKey"/> performs a SEP
-/// roundtrip via <c>SecKeyCreateDecryptedData</c>. Per-op latency is
-/// platform-dependent — low single-digit milliseconds on Apple Silicon, more
-/// on older A-series devices. Callers must dispose the returned
-/// <see cref="KeyAccessor"/> as soon as the AES-GCM operation completes; the
-/// buffer is zeroed and unlocked on dispose.
-/// </para>
-/// <para>
-/// When SEP is not available — typically the iOS Simulator on Intel hosts
-/// (simulators on Apple-Silicon hosts do expose a SEP), pre-T1 Intel Macs, or
-/// any non-Apple platform — <see cref="TryCreate(byte[])"/> returns
-/// <see langword="null"/> and <see cref="KeyAtRestProtectorFactory"/> falls
-/// back to the next tier (obscurity, then no-op) per the configured
-/// <see cref="KeyAtRestProtection"/> policy; <see cref="HardeningPolicy"/>
-/// only governs failures within a tier (e.g. a memory-locking failure), not
-/// the hardware-to-obscurity fallback itself.
-/// </para>
-/// <para>
-/// <b>Accepted residue.</b> The decrypted master transits a
-/// CoreFoundation-owned <c>CFData</c> buffer between
-/// <c>SecKeyCreateDecryptedData</c> and the copy into the locked ephemeral.
-/// That buffer is released (<c>CFRelease</c>) but not zeroed — CoreFoundation
-/// offers no wipe-on-free — so a brief plaintext residue in the malloc heap is
-/// part of this tier's accepted window.
-/// </para>
-/// </remarks>
 internal sealed class AppleSecKeyProtector : DisposableKeyAtRestProtector
 {
     private readonly IntPtr _privateKeyRef;   // SecKeyRef, retained
@@ -66,32 +15,12 @@ internal sealed class AppleSecKeyProtector : DisposableKeyAtRestProtector
     private static bool IsApplePlatform =>
         OperatingSystem.IsMacOS() || OperatingSystem.IsIOS() || OperatingSystem.IsMacCatalyst();
 
-    /// <summary>
-    /// Attempts to wrap <paramref name="master"/> using a freshly generated
-    /// SEP-resident P-256 key. On success the master array is zeroed in place
-    /// and ownership transfers to the returned protector. Returns
-    /// <see langword="null"/> on any failure (SEP unavailable, framework load
-    /// failure, ECIES error) so <see cref="KeyAtRestProtectorFactory"/> can
-    /// fall back to the next tier.
-    /// </summary>
     public static AppleSecKeyProtector? TryCreate(byte[] master)
     {
         if (!IsApplePlatform) return null;
         return TryCreate(master, CreateOrThrow);
     }
 
-    /// <summary>
-    /// Destructive but cached probe: generate a SEP-resident EC key and
-    /// immediately discard it, recording the result for the rest of the
-    /// process. Returns <see langword="false"/> on hosts where the
-    /// <c>AppleSecKeyProtector</c> assembly ships but no actual Secure
-    /// Enclave is present — pre-T1 Intel Macs, iOS Simulator on x86_64.
-    /// </summary>
-    /// <remarks>
-    /// Cost: a single <c>SecKeyCreateRandomKey</c> + <c>CFRelease</c> on
-    /// first call (low single-digit ms on Apple Silicon, more on older
-    /// hardware). Subsequent calls are a single <c>Volatile.Read</c>.
-    /// </remarks>
     internal static bool IsActuallyAvailable()
     {
         var snapshot = Volatile.Read(ref s_availabilityState);
@@ -180,9 +109,6 @@ internal sealed class AppleSecKeyProtector : DisposableKeyAtRestProtector
 
             byte[] wrapped = Native.CFDataCopyToManaged(encryptedData);
 
-            // Master is now wrapped; zero the input array. After this point
-            // the only place the master exists is inside the SEP and inside
-            // ECIES output that only SEP can decrypt.
             CryptographicOperations.ZeroMemory(master);
 
             var protector = new AppleSecKeyProtector(privateKey, wrapped);
@@ -287,10 +213,6 @@ internal sealed class AppleSecKeyProtector : DisposableKeyAtRestProtector
             var sec = NativeLibrary.Load(SecurityFramework);
             var cf = NativeLibrary.Load(CoreFoundationFramework);
 
-            // CFStringRef constants — variable holds a pointer; dereference once.
-            // The fixed-IV ECIES forms are documented as legacy in SecKey.h
-            // (they use an all-zero GCM IV); the VariableIV variant is Apple's
-            // recommended algorithm for SEP ECIES.
             AlgorithmECIES = ReadIntPtrSymbol(sec, "kSecKeyAlgorithmECIESEncryptionCofactorVariableIVX963SHA256AESGCM");
             s_attrKeyType = ReadIntPtrSymbol(sec, "kSecAttrKeyType");
             s_attrKeyTypeECSECPrimeRandom = ReadIntPtrSymbol(sec, "kSecAttrKeyTypeECSECPrimeRandom");
@@ -317,23 +239,6 @@ internal sealed class AppleSecKeyProtector : DisposableKeyAtRestProtector
 
         public static IntPtr BuildKeyGenParameters()
         {
-            // { kSecAttrKeyType: kSecAttrKeyTypeECSECPrimeRandom,
-            //   kSecAttrKeySizeInBits: 256,
-            //   kSecAttrTokenID: kSecAttrTokenIDSecureEnclave,
-            //   kSecPrivateKeyAttrs: {
-            //       kSecAttrIsPermanent: false,
-            //       kSecAttrAccessControl: SecAccessControl(
-            //           kSecAttrAccessibleAlwaysThisDeviceOnly,
-            //           privateKeyUsage) } }
-            //
-            // privateKeyUsage is the access control Apple documents for SEP
-            // private-key operations; it carries no user-presence flags, so
-            // no prompt is ever shown. AlwaysThisDeviceOnly carries no
-            // unlock-state requirement either — appropriate since this key
-            // is never persisted (kSecAttrIsPermanent: false below) and so
-            // has no at-rest state for an accessibility class to protect;
-            // it also keeps key generation working for processes that start
-            // before the device's first unlock since boot.
             int keySize = 256;
             IntPtr keySizeNumber = IntPtr.Zero;
             IntPtr accessControl = IntPtr.Zero;
@@ -393,11 +298,6 @@ internal sealed class AppleSecKeyProtector : DisposableKeyAtRestProtector
             }
         }
 
-        /// <summary>
-        /// Extracts a human-readable description from a <c>CFErrorRef</c>
-        /// (releasing it), for exception messages. Returns a generic message
-        /// when the error is NULL or its description can't be read.
-        /// </summary>
         public static string DescribeAndReleaseError(IntPtr error, string operation)
         {
             if (error == IntPtr.Zero) return operation + " failed.";

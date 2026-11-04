@@ -2,43 +2,13 @@ using System.Runtime.InteropServices;
 
 namespace TopSecret;
 
-/// <summary>
-/// Page-protection mode for <see cref="MemoryProtection"/>.
-/// </summary>
 internal enum PageAccess
 {
-    /// <summary>No access — reads and writes fault. Windows <c>PAGE_NOACCESS</c> / POSIX <c>PROT_NONE</c>.</summary>
     NoAccess,
-    /// <summary>Read-only. Windows <c>PAGE_READONLY</c> / POSIX <c>PROT_READ</c>.</summary>
     ReadOnly,
-    /// <summary>Read/write. Windows <c>PAGE_READWRITE</c> / POSIX <c>PROT_READ | PROT_WRITE</c>.</summary>
     ReadWrite,
 }
 
-/// <summary>
-/// Thin cross-platform wrapper around the page-protection primitives:
-/// <c>VirtualProtect</c> on Windows and <c>mprotect</c> from libc elsewhere,
-/// plus a <b>dedicated page allocator</b> (<c>VirtualAlloc</c> / <c>mmap</c>)
-/// so a guarded page is a standalone OS mapping rather than a heap block.
-/// Used by <see cref="PageGuardedKeyProtector"/> to keep the master key on a
-/// page that faults on access except during the brief window of an unwrap.
-/// </summary>
-/// <remarks>
-/// <para>
-/// <b>Why a dedicated mapping.</b> <see cref="TryAllocatePage"/> maps one page
-/// straight from the OS (not from the C runtime heap): no allocator metadata
-/// lives in or beside it, so marking it <c>PROT_NONE</c> can never disturb the
-/// allocator or a neighbouring allocation, and <see cref="FreePage"/> returns
-/// the pages to the OS (<c>munmap</c> / <c>VirtualFree</c>) rather than to a
-/// reusable heap — so any lock / dump-exclusion / wipe-on-fork advice on the
-/// page dies with the mapping instead of persisting onto whatever the heap
-/// later hands out.
-/// </para>
-/// <para>
-/// Browser-wasm has no page-protection primitive, so <see cref="IsSupported"/>
-/// is <see langword="false"/> there and the guarded tier declines to construct.
-/// </para>
-/// </remarks>
 internal static class MemoryProtection
 {
     // Windows page-protection constants.
@@ -66,18 +36,8 @@ internal static class MemoryProtection
     private static readonly Lazy<bool> s_supported =
         new(Probe, LazyThreadSafetyMode.ExecutionAndPublication);
 
-    /// <summary>
-    /// Whether page protection is reachable on this platform. <see langword="false"/>
-    /// on browser-wasm; the probe runs at most once per process.
-    /// </summary>
     public static bool IsSupported => s_supported.Value;
 
-    /// <summary>
-    /// Maps a single OS page as a dedicated, read/write, page-aligned mapping
-    /// (<c>VirtualAlloc</c> / <c>mmap MAP_ANONYMOUS</c>). Zero-initialised by
-    /// the OS. Returns <see cref="IntPtr.Zero"/> on unsupported platforms or a
-    /// mapping failure; free with <see cref="FreePage"/>.
-    /// </summary>
     public static IntPtr TryAllocatePage(out nuint pageSize)
     {
         pageSize = (nuint)Environment.SystemPageSize;
@@ -85,7 +45,6 @@ internal static class MemoryProtection
         return AllocatePageRaw(pageSize);
     }
 
-    /// <summary>Releases a <see cref="TryAllocatePage"/> mapping back to the OS. Best-effort.</summary>
     public static void FreePage(IntPtr page, nuint pageSize)
     {
         if (page == IntPtr.Zero) return;
@@ -100,7 +59,6 @@ internal static class MemoryProtection
         }
     }
 
-    /// <summary>The raw mapping, with no <see cref="IsSupported"/> guard, so <see cref="Probe"/> can use it.</summary>
     private static IntPtr AllocatePageRaw(nuint pageSize)
     {
         try
@@ -121,12 +79,6 @@ internal static class MemoryProtection
         }
     }
 
-    /// <summary>
-    /// Sets the protection of a page-aligned, whole-page range. Returns
-    /// <see langword="true"/> on success. A <see langword="false"/> return
-    /// means the platform primitive exists but rejected the call — the caller
-    /// applies the configured hardening policy.
-    /// </summary>
     public static bool TryProtect(IntPtr addr, nuint size, PageAccess access)
     {
         if (size == 0) return true;
@@ -134,12 +86,6 @@ internal static class MemoryProtection
         return ProtectRaw(addr, size, access);
     }
 
-    /// <summary>
-    /// The raw platform dispatch, with no <see cref="IsSupported"/> guard —
-    /// so <see cref="Probe"/> can use it without re-entering the still-
-    /// initializing <see cref="Lazy{T}"/>. Owns the sole
-    /// <see cref="PageAccess"/> → native-flag mapping.
-    /// </summary>
     private static bool ProtectRaw(IntPtr addr, nuint size, PageAccess access)
     {
         try
@@ -171,10 +117,6 @@ internal static class MemoryProtection
 
     private static bool Probe()
     {
-        // Only browser-wasm lacks the primitive; every desktop/mobile target
-        // has VirtualProtect or mprotect. Gate explicitly rather than by
-        // accident, then exercise a real alloc/protect round trip through the
-        // same dispatch TryProtect uses.
         if (!OperatingSystem.IsWindows() &&
             !OperatingSystem.IsLinux() &&
             !OperatingSystem.IsAndroid() &&

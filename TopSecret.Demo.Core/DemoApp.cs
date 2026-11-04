@@ -6,11 +6,6 @@ using System.Text;
 
 namespace TopSecret.Demo;
 
-/// <summary>
-/// The demo scenarios, shared verbatim between the console host
-/// (<c>TopSecret.Demo</c>) and the browser host (<c>TopSecret.Demo.Wasm</c>,
-/// which routes <see cref="Console.Out"/> into an xterm.js terminal).
-/// </summary>
 public static class DemoApp
 {
     public static async Task RunAsync()
@@ -21,13 +16,6 @@ public static class DemoApp
         Console.WriteLine("==================================");
         Console.WriteLine();
 
-        // 0. Configure key-at-rest wrapping in your composition root, before the
-        //    first ProtectedString is constructed. HardwareBackedPreferred takes
-        //    whatever protection the platform offers (Apple SEP / Android Keystore /
-        //    Windows TPM via the optional TopSecret.ProtectedString.WindowsTpm package),
-        //    falling back to Obscurity, then None, without throwing on platforms
-        //    that don't have any. Use HardwareBackedRequired only when you want
-        //    construction to throw on a host without a hardware-backed provider.
         ProtectedStringOptions.KeyAtRestProtection = KeyAtRestProtection.HardwareBackedPreferred;
 
         Console.WriteLine($"  Hardware-backed availability: {ProtectedString.HardwareBackedAvailability}");
@@ -35,13 +23,6 @@ public static class DemoApp
         Console.WriteLine("  Obscurity wrap (if reached):  AES-GCM-256 with per-protector random wrap key (HKDF stream-XOR fallback)");
         Console.WriteLine();
 
-        // Every run works on fresh random inputs (DemoInputs), so the lengths,
-        // hashes and checksums below change from run to run — proof the output
-        // is computed live, not replayed.
-
-        // 1. Wrap an existing string.
-        //    (See README for the caveat — string is immutable, so the original lives on
-        //    in the GC heap until collected. Prefer (2) or (3) when you can.)
         string secretValue = DemoInputs.RandomSecret();
         using var fromString = new ProtectedString(secretValue);
         Print("from string ctor:", fromString);
@@ -59,10 +40,6 @@ public static class DemoApp
         built.MakeReadOnly();
         Print("built incrementally:", built);
 
-        // 4. Use the value briefly. The ReadOnlySpan<char> passed to the callback
-        //    is a ref struct — the C# compiler refuses to let it escape the lambda
-        //    (no capture by closure, no storage in a field, no return, no await).
-        //    The plaintext buffer is wiped the moment the callback returns.
         fromString.Access(plain =>
         {
             Span<byte> utf8 = stackalloc byte[Encoding.UTF8.GetMaxByteCount(plain.Length)];
@@ -75,33 +52,14 @@ public static class DemoApp
             Console.WriteLine("     a SHA-256 of a password as a credential verifier.)");
         });
 
-        // 5. CopyTo — copy the plaintext into a caller-owned stackalloc
-        //    buffer, then operate on it without going through the Access(...)
-        //    callback shape. The destination span is yours; you're responsible
-        //    for letting it fall out of scope (a stackalloc dies with the
-        //    method frame, so this pattern is naturally bounded).
         Console.WriteLine();
         RunCopyToScenario(fromString);
 
-        // 6. WriteUtf8To — stream the plaintext as UTF-8 bytes straight into a
-        //    sink. The intermediate UTF-8 staging buffer is pinned, locked,
-        //    and wiped on exit; nothing materialises as a managed `string`.
-        //    Useful for "send the secret over a network / pipe / file" without
-        //    a managed-string detour.
         using var ms = new MemoryStream();
         int written = fromString.WriteUtf8To(ms);
-        // Fingerprint, not contents — printing even a few plaintext bytes
-        // would contradict the "never log the body" discipline this demo
-        // preaches.
         var sinkFingerprint = SHA256.HashData(ms.GetBuffer().AsSpan(0, written));
         Console.WriteLine($"  WriteUtf8To(MemoryStream): wrote {written} bytes; SHA-256 fingerprint = {Convert.ToHexString(sinkFingerprint.AsSpan(0, 8))}…");
-        //    In a real app the sink would be a NetworkStream / SslStream /
-        //    FileStream rather than a MemoryStream — using a MemoryStream here
-        //    only because a console demo can't open a network socket. The
-        //    library does what it can up to Stream.Write; what the stream
-        //    then does with the bytes is the caller's responsibility.
 
-        // 7. Constant-time equality.
         string equalValue = DemoInputs.RandomSecret();
         using var a = new ProtectedString(equalValue);
         using var b = new ProtectedString(equalValue);
@@ -110,11 +68,6 @@ public static class DemoApp
         Console.WriteLine($"  a.Equals(b) (same value)      = {a.Equals(b)}");
         Console.WriteLine($"  a.Equals(c) (different value) = {a.Equals(c2)}");
 
-        // 8. Credential verification — Argon2id with OWASP-aligned defaults.
-        //    Runs everywhere, including the browser: at the library's default
-        //    parallelism of 1, the KDF's lane runs inline on the calling
-        //    thread rather than via the thread pool, so it never needs a
-        //    second thread the single-threaded WASM runtime doesn't have.
         Console.WriteLine();
         var salt = RandomNumberGenerator.GetBytes(16);
         var sw = Stopwatch.StartNew();
@@ -131,11 +84,6 @@ public static class DemoApp
         Console.WriteLine();
         Console.WriteLine($"  ToString safety: {fromString}");
 
-        // 10. Interop with string-only APIs — HttpClient request body via custom
-        //     HttpContent. WriteUtf8To streams the plaintext straight into the
-        //     request stream; no managed `string` materialises in this process.
-        //     The demo runs against an in-process HttpMessageHandler so it does
-        //     not require network access.
         Console.WriteLine();
         Console.WriteLine("  Interop demos (offline, against an in-process HttpMessageHandler):");
 
@@ -147,17 +95,10 @@ public static class DemoApp
                 Content = new ProtectedStringContent(fromString),
             };
             using var bodyResp = await http.SendAsync(bodyReq);
-            // ReadAsByteArrayAsync, deliberately: the byte count is the true
-            // UTF-8 length, and the echoed secret never materialises as a
-            // managed string in this process.
             var bodyEcho = await bodyResp.Content.ReadAsByteArrayAsync();
             Console.WriteLine($"    POST body via WriteUtf8To: server saw {bodyEcho.Length} UTF-8 bytes (echoed length only — never log the body)");
         }
 
-        // 11. Interop with string-only APIs — Bearer token via DelegatingHandler.
-        //     The string materialises inside SendAsync (under #pragma TPS001)
-        //     and dies with the request. The ProtectedString stays encrypted at
-        //     rest between sends.
         using (var inner = new EchoHandler())
         using (var bearerHandler = new ProtectedBearerHandler(fromString) { InnerHandler = inner })
         using (var http = new HttpClient(bearerHandler))
@@ -169,11 +110,6 @@ public static class DemoApp
             Console.WriteLine($"    DelegatingHandler bearer: server saw scheme=\"{hdrEcho.Split(' ')[0]}\", token length={hdrEcho.Length - "Bearer ".Length}");
         }
 
-        // 12. ProtectedBlob — the bulk-data sibling (TopSecret.ProtectedBlob
-        //     package). Multi-MB secrets live as chunked AES-GCM-256 ciphertext in
-        //     ordinary memory; the per-blob key is wrapped under the same process
-        //     master configured in step 0, so the hardware-backed tier (when
-        //     available) covers blobs too. Reads decrypt one chunk at a time.
         Console.WriteLine();
         Console.WriteLine("  ProtectedBlob (bulk secrets):");
 
@@ -198,9 +134,6 @@ public static class DemoApp
             int firstChunkLength = blob.AccessChunk(0, chunk => chunk.Length);
             Console.WriteLine($"    AccessChunk(0) plaintext length: {firstChunkLength:N0} bytes");
 
-            // WriteTo (the blob-shaped sibling of WriteUtf8To) streams the
-            // plaintext out; FromStream re-wraps unknown-length input as it
-            // streams — plaintext residency never exceeds two chunks.
             using var restored = new MemoryStream();
             blob.WriteTo(restored);
             Console.WriteLine($"    WriteTo(MemoryStream): wrote {restored.Length:N0} bytes");
@@ -211,12 +144,6 @@ public static class DemoApp
             }
         }
 
-        // 13. Run the library's tests live, in-process, via the reflection-
-        //     based DemoTestRunner (NUnit's own NUnitTestAssemblyRunner spawns
-        //     a worker thread, which the single-threaded WASM runtime cannot
-        //     do). Tests not valid in this environment self-skip (the
-        //     hardware tier where no secure element is present), so the demo
-        //     shows which behaviours actually verify on the host it runs on.
         Console.WriteLine();
         Console.WriteLine("  Live test run (representative slice; full suites run in CI):");
         await DemoTestRunner.RunAsync("    ");
@@ -225,11 +152,6 @@ public static class DemoApp
         //     browser hosts report through the same channel.
         runStopwatch.Stop();
 
-        // Allocated THIS run (delta), not process-lifetime cumulative — the
-        // latter only ever grows across repeated runs. Then force a full
-        // collection so the live-heap figure reflects what survives, and so a
-        // "Run again" starts from a flushed heap rather than accumulating the
-        // previous run's garbage.
         long allocatedThisRun = GC.GetTotalAllocatedBytes() - allocatedAtStart;
         GC.Collect();
         GC.WaitForPendingFinalizers();
@@ -257,14 +179,8 @@ public static class DemoApp
 
     private static void RunCopyToScenario(ProtectedString source)
     {
-        // stackalloc must live in a non-async frame — a Span<char> cannot
-        // cross the awaits in RunAsync, which is why this scenario sits in
-        // its own method.
         Span<char> scratch = stackalloc char[source.Length];
         int copied = source.CopyTo(scratch);
-        //    Compute a non-cryptographic character checksum inline as a debug
-        //    signature. Note we never `new string(scratch)` — the same Access
-        //    caveat about copies escaping the callback applies here.
         int charSum = 0;
         foreach (var ch in scratch[..copied]) charSum += ch;
         Console.WriteLine($"  CopyTo() into stackalloc: copied {copied} chars, charSum={charSum} (debug signature only)");
@@ -277,11 +193,6 @@ public static class DemoApp
     }
 }
 
-// === Interop demo plumbing ===
-
-// Streams the ProtectedString plaintext as UTF-8 directly into the request body.
-// No managed `string` ever materialises — the bytes go from the decrypted,
-// pinned, wipe-on-exit buffer straight into HttpClient's request stream.
 internal sealed class ProtectedStringContent : HttpContent
 {
     private readonly ProtectedString _ps;
@@ -301,10 +212,6 @@ internal sealed class ProtectedStringContent : HttpContent
     protected override bool TryComputeLength(out long length) { length = -1; return false; }
 }
 
-// Materialises a Bearer token string inside Access for one send and lets it
-// fall out of scope when the request completes. Never assign the result to
-// HttpClient.DefaultRequestHeaders.Authorization — that would pin the string
-// for the lifetime of the client.
 internal sealed class ProtectedBearerHandler : DelegatingHandler
 {
     private readonly ProtectedString _token;
@@ -324,9 +231,6 @@ internal sealed class ProtectedBearerHandler : DelegatingHandler
     }
 }
 
-// In-process handler so the demo runs offline. Echoes the request body back
-// in the response body (length only is printed by the caller) and the
-// Authorization header back as X-Echo-Authorization.
 internal sealed class EchoHandler : HttpMessageHandler
 {
     protected override async Task<HttpResponseMessage> SendAsync(

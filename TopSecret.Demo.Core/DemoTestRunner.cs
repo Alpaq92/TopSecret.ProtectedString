@@ -3,26 +3,6 @@ using NUnit.Framework;
 
 namespace TopSecret.Demo;
 
-/// <summary>
-/// Runs the demo's NUnit tests from C# code, in-process — the idea behind the
-/// Stack Overflow question "How to run NUnit tests from C# code".
-/// </summary>
-/// <remarks>
-/// NUnit's own <c>NUnitTestAssemblyRunner</c> executes tests on a worker
-/// thread, which throws <see cref="System.Threading.ThreadStateException"/>
-/// on the single-threaded WASM runtime. So this is a minimal runner that
-/// discovers <c>[Test]</c> methods by reflection and invokes them on the
-/// calling thread (awaiting <see cref="Task"/>-returning async tests rather
-/// than fire-and-forgetting them, which would report false PASSes),
-/// classifying the outcome from NUnit's own result
-/// exceptions — <see cref="IgnoreException"/> (from <c>Assert.Ignore</c>) and
-/// <see cref="InconclusiveException"/> become SKIP, <see cref="SuccessException"/>
-/// (from <c>Assert.Pass</c>) and a clean return are PASS, and
-/// <see cref="AssertionException"/> or any other exception is FAIL. This runs
-/// identically in the console and the browser; tests that aren't valid on the
-/// host call <c>Assert.Ignore</c> and surface as SKIP, which is how the demo
-/// "recognises tests valid in the current environment".
-/// </remarks>
 public static class DemoTestRunner
 {
     public static async Task RunAsync(string indent = "")
@@ -74,10 +54,6 @@ public static class DemoTestRunner
     {
         try
         {
-            // Await async Task tests instead of fire-and-forgetting them —
-            // never block on the Task (a .Wait()/.Result here would deadlock
-            // the single-threaded WASM runtime, the very bug this runner
-            // exists to avoid).
             if (test.Invoke(instance, null) is Task task) await task;
             Report(indent, "PASS", test.Name);
             return Outcome.Pass;

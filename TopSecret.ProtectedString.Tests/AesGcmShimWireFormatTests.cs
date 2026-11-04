@@ -5,26 +5,6 @@ using Org.BouncyCastle.Crypto.Parameters;
 
 namespace TopSecret.ProtectedStringTests;
 
-/// <summary>
-/// Wire-format compatibility tests between
-/// <see cref="System.Security.Cryptography.AesGcm"/> and BouncyCastle's
-/// <c>GcmBlockCipher</c>. The main library uses BouncyCastle only on the
-/// <c>net10.0-browser</c> TFM (where <c>AesGcm.IsSupported</c> is
-/// <see langword="false"/>); these tests run on <c>net10.0</c> and verify
-/// that the two implementations agree on the AES-GCM-256 wire format under
-/// the parameter shapes the library actually uses (12-byte nonce, 16-byte
-/// tag, 8-byte AAD, 32-byte key).
-/// </summary>
-/// <remarks>
-/// The browser-wasm path is otherwise build-verified only — without a wasm
-/// test runner, we cannot run the suite end-to-end on
-/// <c>net10.0-browser</c>. These tests close the gap by proving the BC
-/// primitives the shim wraps produce ciphertext byte-for-byte identical to
-/// what the in-box <see cref="AesGcm"/> produces under the same inputs.
-/// If that holds, the shim's thin <c>BouncyEncrypt</c> / <c>BouncyDecrypt</c>
-/// wrappers (which only marshal between <see cref="ReadOnlySpan{T}"/> and
-/// the BC byte-array API) are correct by construction.
-/// </remarks>
 [TestFixture]
 public class AesGcmShimWireFormatTests
 {
@@ -118,11 +98,6 @@ public class AesGcmShimWireFormatTests
     [Test]
     public void AesGcm_and_BC_produce_identical_ciphertext_for_identical_inputs()
     {
-        // Stronger than round-trip: with the same key, nonce, AAD, and
-        // plaintext, both implementations must emit the same bytes —
-        // GCM is deterministic on (key, nonce, plaintext, AAD), so any
-        // disagreement here points at a wire-format mismatch the shim
-        // would inherit on the browser-wasm path.
         var key = Random(KeySize);
         var nonce = Random(NonceSize);
         var aad = Random(AadSize);
@@ -151,9 +126,6 @@ public class AesGcmShimWireFormatTests
     [Test]
     public void Wrong_aad_fails_decrypt_under_BC_when_encrypted_under_AesGcm()
     {
-        // The shim binds the per-instance id as AAD on every operation. A
-        // wrong-AAD decrypt must fail the tag check — verify this on the
-        // BC side, since AesGcm's behaviour is well-tested already.
         var key = Random(KeySize);
         var nonce = Random(NonceSize);
         var rightAad = Random(AadSize);

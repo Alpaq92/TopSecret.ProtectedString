@@ -3,12 +3,6 @@ using TopSecret;
 
 namespace TopSecret.ProtectedBlobTests;
 
-/// <summary>
-/// Lease and lifetime discipline: the DEK leaves locked scratch before user
-/// code runs, construction failures release the protector reference, and
-/// misbehaving callbacks (throwing, disposing mid-pass) leave the instance
-/// and the shared pool in a usable state.
-/// </summary>
 [TestFixture]
 [NonParallelizable] // observes the process-wide scratch pool and protector holder count
 public class ReadDisciplineTests
@@ -17,7 +11,6 @@ public class ReadDisciplineTests
 
     private static byte[] RandomBytes(int count) => RandomNumberGenerator.GetBytes(count);
 
-    /// <summary>Reads <paramref name="goodBytes"/> bytes normally, then throws <see cref="IOException"/> on the next read.</summary>
     private sealed class FaultingReadStream(int goodBytes) : Stream
     {
         private int _served;
@@ -40,7 +33,6 @@ public class ReadDisciplineTests
         public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
     }
 
-    /// <summary>Accepts <paramref name="goodBytes"/> bytes, then throws <see cref="IOException"/> on the next write.</summary>
     private sealed class FaultingWriteStream(int goodBytes) : Stream
     {
         private int _accepted;
@@ -60,11 +52,6 @@ public class ReadDisciplineTests
         }
     }
 
-    /// <summary>
-    /// Holder count on the live process protector, measured through the
-    /// same AddRef/Release pair a blob uses (so the measurement itself is
-    /// net zero).
-    /// </summary>
     internal static int ProtectorHolderCount()
     {
         var protector = ProtectedString.GetOrInitProcessProtector();
@@ -93,9 +80,6 @@ public class ReadDisciplineTests
     [Test]
     public void AccessChunk_Returns_The_Dek_Lease_Before_Invoking_The_Handler()
     {
-        // 100 plaintext bytes: the chunk scratch comes from the 128-byte
-        // pool class, so the 64-byte class is touched only by the 32-byte DEK
-        // lease — which lets the free list reveal whether it was returned.
         using var blob = new ProtectedBlob(RandomBytes(100).AsSpan(), SmallChunk);
 
         // Prime the 64-byte free list (LIFO) with two known chunks: top = a, then b.
@@ -109,9 +93,6 @@ public class ReadDisciplineTests
         int probeOffset = -1;
         blob.AccessChunk(0, _ =>
         {
-            // RentDek popped `a`. If the DEK was returned before we got
-            // here, `a` is back on top and this probe pops it; if the DEK
-            // were still outstanding the probe would pop `b` instead.
             var probe = LockedScratchPool.Rent(ChunkFormat.KeySize);
             probeOffset = probe.Offset;
             probe.Return();

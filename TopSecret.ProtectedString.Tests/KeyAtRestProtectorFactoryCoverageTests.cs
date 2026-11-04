@@ -5,38 +5,11 @@ using TopSecret;
 
 namespace TopSecret.ProtectedStringTests;
 
-/// <summary>
-/// Coverage-focused tests for <see cref="KeyAtRestProtectorFactory"/>'s
-/// mode/tier walk (<c>Create</c> → <c>CreateInner</c> →
-/// <c>TryCreateHardwareBacked</c> / <c>TryCreateObscurity</c>), the one-shot
-/// "no hardware-backed provider registered" diagnostic, the
-/// registered-provider iteration, and the all-probes-false availability path.
-/// Complements <see cref="KeyAtRestProtectorTests"/>, which covers the
-/// individual protector implementations and the registration surface but
-/// never drives <c>Create</c> through the hardware/obscurity tiers.
-/// </summary>
-/// <remarks>
-/// Global-state hygiene: every fixture here is <c>[NonParallelizable]</c>,
-/// snapshots the <see cref="ProtectedStringOptions"/> it mutates in
-/// <c>[SetUp]</c>, restores them in <c>[TearDown]</c>, and clears the
-/// process-global provider registry on both sides via
-/// <see cref="TestAccessors.ResetFactoryRegistrations"/> — the same pattern
-/// the existing <c>KeyAtRestProtectorTests.FactoryRegistration</c> fixture
-/// uses. <see cref="KeyAtRestProtectorFactory.Create"/> reads the options
-/// live on every call, so temporary mutation + restore cannot perturb the
-/// already-initialised process-wide protector of other tests.
-/// </remarks>
 public class KeyAtRestProtectorFactoryCoverageTests
 {
     private static bool IsApplePlatform =>
         OperatingSystem.IsMacOS() || OperatingSystem.IsIOS() || OperatingSystem.IsMacCatalyst();
 
-    // The "no provider registered" warning in
-    // WarnIfHardwareBackedRequestedButNoProviderRegistered is gated by the
-    // private one-shot field s_warnedNoProvider, which (deliberately) has no
-    // internal reset hook. Reflection is the same sanctioned bypass style
-    // TestAccessors uses for other private test-only state; the hard throw
-    // makes a rename fail loudly at test time instead of silently skipping.
     private static readonly FieldInfo s_warnedNoProviderField =
         typeof(KeyAtRestProtectorFactory).GetField(
             "s_warnedNoProvider", BindingFlags.Static | BindingFlags.NonPublic)
@@ -46,11 +19,6 @@ public class KeyAtRestProtectorFactoryCoverageTests
     private static void ResetNoProviderWarningGate() =>
         s_warnedNoProviderField.SetValue(null, 0);
 
-    /// <summary>
-    /// Test double standing in for a hardware-backed protector (what a TPM
-    /// satellite package would register). Honours the factory ownership
-    /// contract: copies then zeros the input master.
-    /// </summary>
     private sealed class FakeHardwareBackedProtector : KeyAtRestProtector, IDisposable
     {
         private readonly byte[] _master;
@@ -188,9 +156,6 @@ public class KeyAtRestProtectorFactoryCoverageTests
             }
         }
 
-        // Covers KeyAtRestProtector.cs 217 (Registration.Factory getter), 400
-        // (registry-not-empty early return in the warning check), 427 (tier-1 hit),
-        // and 482-483,485,489-490 (snapshot + provider iteration returning non-null).
         [Test]
         public void Preferred_returns_protector_from_registered_provider()
         {
@@ -327,10 +292,6 @@ public class KeyAtRestProtectorFactoryCoverageTests
         [Test]
         public void Obscurity_with_invalid_master_size_falls_back_to_noop_under_Ignore_policy()
         {
-            // Every obscurity protector declines a non-32-byte master, which is
-            // the only cross-platform way to reach the tier-2 failure branch.
-            // Ignore keeps HardeningPolicy.OnFailure side-effect-free so no
-            // process-global warning gate is consumed.
             ProtectedStringOptions.MemoryLockingFailureBehavior = MemoryLockingFailureBehavior.Ignore;
             ProtectedStringOptions.KeyAtRestProtection = KeyAtRestProtection.Obscurity;
             ProtectedStringOptions.UnwrappedKeyCacheTtl = TimeSpan.Zero;

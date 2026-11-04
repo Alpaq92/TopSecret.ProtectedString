@@ -4,17 +4,6 @@ using TopSecret;
 
 namespace TopSecret.ProtectedStringTests;
 
-/// <summary>
-/// Coverage-focused tests for the rarely exercised regions of
-/// <see cref="ProtectedString"/>: the periodic-rotation timer machinery
-/// (<c>EnsurePeriodicRotationTimer</c> and its callback), the transient-slot
-/// rotation warning, the rotation reentrancy guard, the internal
-/// process-protector accessor, and the failure-cleanup branches of
-/// <c>LiftIntoBuildBuffer</c> / <c>EncryptInternal</c> / <c>DecryptInto</c>.
-/// Every test saves and restores the process-global state it touches
-/// (options, rotation timer, protector registry, warning gates), matching the
-/// save-mutate-restore idiom used throughout <c>ProtectedStringTests</c>.
-/// </summary>
 [TestFixture]
 [NonParallelizable] // Mutates process-global options, the rotation timer slot, and Trace listeners.
 public class RotationTimerAndRareBranchCoverageTests
@@ -36,11 +25,6 @@ public class RotationTimerAndRareBranchCoverageTests
     private static readonly MethodInfo s_ensureTimerMethod = StaticMethod("EnsurePeriodicRotationTimer");
     private static readonly MethodInfo s_shouldWarnMethod = StaticMethod("ShouldWarnRotatingAgainstTransientSlotProvider");
 
-    /// <summary>
-    /// Disposes any live periodic-rotation timer (waiting for an in-flight
-    /// callback to drain) and clears the static slot, so each test starts and
-    /// ends with the process-default "no timer" state other tests expect.
-    /// </summary>
     private static void DisposeAndClearRotationTimer()
     {
         var timer = (Timer?)s_rotationTimerField.GetValue(null);
@@ -66,12 +50,6 @@ public class RotationTimerAndRareBranchCoverageTests
         return condition();
     }
 
-    /// <summary>
-    /// Thread-safe trace capture: the periodic-rotation callback writes from a
-    /// thread-pool thread while the test polls, so the shared list must be
-    /// locked (unlike <see cref="CapturingTraceListener"/>, which is only ever
-    /// read after the traced operation completed on the test thread).
-    /// </summary>
     private sealed class ConcurrentCapturingTraceListener : TraceListener
     {
         private readonly object _gate = new();
@@ -103,11 +81,6 @@ public class RotationTimerAndRareBranchCoverageTests
     [TearDown]
     public void Teardown() => DisposeAndClearRotationTimer();
 
-    // ---- ProtectorLifetime refcounting ------------------------------------
-
-    // Exercises the deterministic disposal path: a protector superseded by
-    // RotateProcessKey must be disposed the moment its last holder migrates
-    // off it — no GC/finalizer involvement.
     [Test]
     [NonParallelizable]
     public void Rotation_disposes_superseded_protector_when_last_holder_migrates()
@@ -118,10 +91,6 @@ public class RotationTimerAndRareBranchCoverageTests
         {
             ProtectedStringOptions.ProcessKeyRotationPolicy = ProcessKeyRotation.OnDemand;
 
-            // Install a fresh protector as the global so ambient instances
-            // from other tests (which reference earlier protectors, or hold
-            // never-released GetOrInitProcessProtector references) cannot pin
-            // the protector this test rotates away.
             var master = GC.AllocateArray<byte>(32, pinned: true);
             System.Security.Cryptography.RandomNumberGenerator.Fill(master);
             var fresh = KeyAtRestProtectorFactory.Create(master);
@@ -144,10 +113,6 @@ public class RotationTimerAndRareBranchCoverageTests
         }
     }
 
-    // The inverse guarantee: while any holder still references the superseded
-    // protector (here: an instance constructed under the Disabled policy, so
-    // it is not in the migration registry), rotation must NOT dispose it —
-    // the holder can still decrypt through it.
     [Test]
     [NonParallelizable]
     public void Rotation_keeps_superseded_protector_alive_while_a_holder_remains()
@@ -174,9 +139,6 @@ public class RotationTimerAndRareBranchCoverageTests
             Assert.That(unregistered.Access(plain => new string(plain)), Is.EqualTo("pinned-holder"),
                 "the unmigrated instance must still decrypt under the old protector");
 
-            // Disposing the last holder is what triggers the deterministic
-            // teardown (the using is the failure-path safety net; Dispose is
-            // idempotent so the double call is fine).
             unregistered.Dispose();
             Assert.That(IsProtectorDisposed(fresh), Is.True,
                 "disposing the last holder must dispose the superseded protector");
@@ -190,11 +152,6 @@ public class RotationTimerAndRareBranchCoverageTests
 
     private static bool IsProtectorDisposed(KeyAtRestProtector protector)
     {
-        // The flag lives on DisposableKeyAtRestProtector (an Interlocked int)
-        // for every resource-owning protector, and on TtlCachingKeyAtRestProtector
-        // (a bool) which deliberately does not derive from it. Private fields of
-        // a base type are not returned by GetField on the derived type, so walk
-        // the hierarchy.
         for (var t = protector.GetType(); t is not null; t = t.BaseType)
         {
             var field = t.GetField("_disposed", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.DeclaredOnly);
@@ -209,11 +166,6 @@ public class RotationTimerAndRareBranchCoverageTests
         throw new InvalidOperationException($"_disposed not found on {protector.GetType().Name} or its bases");
     }
 
-    // ---- EnsurePeriodicRotationTimer + timer callback ---------------------
-
-    // Exercises ProtectedString.cs line 252 (InitInstance -> EnsurePeriodicRotationTimer under Periodic policy),
-    // the timer-creation block 1322-1341, and the callback lambda 1334-1340 on both its success (1335)
-    // and catch (1336-1339, Trace.TraceError) paths.
     [Test]
     [NonParallelizable]
     public void Periodic_policy_starts_rotation_timer_whose_callback_rotates_and_logs_failures()
@@ -243,9 +195,6 @@ public class RotationTimerAndRareBranchCoverageTests
             Assert.That(rotated, Is.True,
                 "the periodic timer callback should have performed at least one rotation");
 
-            // Failure path of the callback: with the policy flipped back to
-            // Disabled, RotateProcessKey throws inside the callback and the
-            // catch block reports via Trace.TraceError instead of crashing.
             ProtectedStringOptions.ProcessKeyRotationPolicy = ProcessKeyRotation.Disabled;
             bool logged = WaitUntil(
                 () => listener.AnyContains("periodic rotation failed"),
@@ -341,11 +290,6 @@ public class RotationTimerAndRareBranchCoverageTests
         }
     }
 
-    // ---- transient-slot rotation warning ----------------------------------
-
-    // Exercises ProtectedString.cs lines 1331/1345 (shouldWarn == true), 1357-1364
-    // (ShouldWarnRotatingAgainstTransientSlotProvider full path incl. the one-shot CAS gate),
-    // and 1377-1384 (EmitTransientSlotRotationWarning trace text).
     [Test]
     [NonParallelizable]
     public void Periodic_rotation_with_transient_slot_provider_emits_one_shot_trace_warning()
@@ -357,9 +301,6 @@ public class RotationTimerAndRareBranchCoverageTests
         Trace.Listeners.Add(listener);
         try
         {
-            // Arm the warning: hardware-backed posture + a registered provider
-            // that declares itself transient-slot constrained (TPM-style), and
-            // an un-tripped one-shot gate.
             TestAccessors.ResetFactoryRegistrations();
             KeyAtRestProtectorFactory.RegisterHardwareBacked(
                 factory: _ => null, // never actually constructs
@@ -396,10 +337,6 @@ public class RotationTimerAndRareBranchCoverageTests
         }
     }
 
-    // ---- rotation reentrancy guard ----------------------------------------
-
-    // Exercises ProtectedString.cs line 1193: RotateProcessKey drops the call
-    // (no throw, no rotation) when another rotation is already in flight.
     [Test]
     [NonParallelizable]
     public void RotateProcessKey_drops_the_call_when_another_rotation_is_in_flight()
@@ -435,10 +372,6 @@ public class RotationTimerAndRareBranchCoverageTests
         }
     }
 
-    // ---- internal process-protector accessor -------------------------------
-
-    // Exercises ProtectedString.cs line 274: the internal GetOrInitProcessProtector
-    // seam consumed by sibling assemblies (TopSecret.ProtectedBlob).
     [Test]
     public void GetOrInitProcessProtector_returns_the_stable_process_wide_protector()
     {
@@ -452,19 +385,12 @@ public class RotationTimerAndRareBranchCoverageTests
             "the accessor must expose the same reference as the s_keyProtector slot");
     }
 
-    // ---- build-buffer / encrypt failure-cleanup branches -------------------
-
-    // Exercises ProtectedString.cs lines 436-439: LiftIntoBuildBuffer wipes the freshly
-    // allocated build buffer and rethrows when decrypting the existing ciphertext fails.
     [Test]
     public void AppendChar_rethrows_and_leaves_instance_intact_when_lift_decrypt_fails()
     {
         var goodProtector = ProtectedString.GetOrInitProcessProtector();
         using var ps = new ProtectedString("lift-me".AsSpan());
 
-        // Instance-local sabotage only: swap this instance's protector for one
-        // whose UnwrapKey always throws, forcing DecryptInto to fail inside
-        // LiftIntoBuildBuffer's try block.
         TestAccessors.SetInstanceProtector(ps, new AlwaysThrowingProtector());
         Assert.Throws<InvalidOperationException>(() => ps.AppendChar('!'),
             "the decrypt failure must propagate out of AppendChar");
@@ -502,9 +428,6 @@ public class RotationTimerAndRareBranchCoverageTests
         Assert.That(ps.Access(plain => new string(plain)), Is.EqualTo("ab"));
     }
 
-    // Exercises RentPlaintextLocked's zero-length early return (empty span,
-    // no lease, no decrypt), reached via Copy() on an empty, committed
-    // (non-build-mode) instance.
     [Test]
     public void Copy_of_empty_committed_instance_yields_an_independent_empty_copy()
     {

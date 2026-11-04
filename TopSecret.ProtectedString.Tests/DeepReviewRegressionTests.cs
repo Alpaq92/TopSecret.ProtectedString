@@ -3,13 +3,6 @@ using TopSecret;
 
 namespace TopSecret.ProtectedStringTests;
 
-/// <summary>
-/// Regression tests for the 2026-11 deep review: option validation, the
-/// timer-ceiling cap, <see cref="ProtectedString.TryRotateProcessKey"/>,
-/// <see cref="ProtectedString.Build"/>, and the Argon2 contract changes.
-/// Fixtures that touch process-global options are
-/// <see cref="NonParallelizableAttribute"/> and restore what they changed.
-/// </summary>
 [TestFixture]
 [NonParallelizable]
 public class DeepReviewRegressionTests
@@ -78,9 +71,6 @@ public class DeepReviewRegressionTests
         var priorInterval = ProtectedStringOptions.ProcessKeyRotationInterval;
         try
         {
-            // 4 294 967 294 ms is System.Threading.Timer's ceiling. Above it,
-            // the TTL cache used to install the key and then throw from
-            // Timer.Change, leaving a zeroed buffer as the "cached" master.
             Assert.That(ProtectedStringOptions.MaxTimerDuration.TotalMilliseconds,
                 Is.EqualTo(4_294_967_294d));
 
@@ -152,9 +142,6 @@ public class DeepReviewRegressionTests
         {
             ProtectedStringOptions.ProcessKeyRotationPolicy = ProcessKeyRotation.OnDemand;
 
-            // Install an instance whose protector blocks inside UnwrapKey, so a
-            // rotation pass that migrates it stalls until we release it. A
-            // second call made while the first is stalled must report false.
             using var ps = new ProtectedString("slow".AsSpan());
             var gate = new ManualResetEventSlim(false);
             var entered = new ManualResetEventSlim(false);
@@ -180,7 +167,6 @@ public class DeepReviewRegressionTests
         }
     }
 
-    /// <summary>Delegating protector whose first UnwrapKey blocks on a gate (migration stall).</summary>
     private sealed class BlockingProtector : KeyAtRestProtector
     {
         private readonly KeyAtRestProtector _inner;
@@ -273,9 +259,6 @@ public class DeepReviewRegressionTests
     [Test]
     public void Argon2id_hash_leaves_the_instance_fully_usable_and_disposable()
     {
-        // The KDF runs under the instance lock but must return the pooled
-        // plaintext lease before it starts; afterwards every operation and
-        // Dispose must behave normally.
         using var ps = new ProtectedString("hunter2".AsSpan());
         var salt = RandomNumberGenerator.GetBytes(16);
         _ = ps.ComputeArgon2idHash(salt, iterations: 1, memoryKb: 8);

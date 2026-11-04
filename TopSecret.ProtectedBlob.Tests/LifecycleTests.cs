@@ -63,12 +63,6 @@ public class LifecycleTests
 [TestFixture]
 public class RotationInterplayTests
 {
-    /// <summary>
-    /// Pins the invariant the blob's rotation story rests on: blobs snapshot
-    /// the process protector at construction, RotateProcessKey never disposes
-    /// superseded protectors, so a pre-rotation blob keeps decrypting — and
-    /// blobs are (documented as) NOT re-keyed by rotation.
-    /// </summary>
     [Test]
     public void Blob_Survives_RotateProcessKey()
     {
@@ -103,11 +97,6 @@ public class RotationInterplayTests
 [TestFixture]
 public class KeyProtectionTests
 {
-    /// <summary>
-    /// Hardware-tier smoke: on hosts with a hardware-backed provider the
-    /// whole path (DEK wrap under the hardware-wrapped master) round-trips;
-    /// elsewhere the test self-skips, matching the TPM suites' pattern.
-    /// </summary>
     [Test]
     public void RoundTrip_Under_Ambient_Key_Protection_Tier()
     {

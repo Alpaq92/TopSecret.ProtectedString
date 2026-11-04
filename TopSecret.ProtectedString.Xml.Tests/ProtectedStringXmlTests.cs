@@ -82,9 +82,6 @@ public class ProtectedStringXmlTests
     [Test]
     public void FromXml_does_not_find_a_prefixed_element_by_local_name()
     {
-        // Documented limitation: ReadToFollowing matches the qualified name,
-        // so a prefixed element is not found by its local name. Namespaced
-        // documents should drive their own reader.
         const string xml = "<config xmlns:s=\"urn:x\"><s:Password>x</s:Password></config>";
         Assert.Throws<InvalidOperationException>(() => ProtectedStringXml.FromXml(xml, "Password"));
     }
@@ -103,9 +100,6 @@ public class ProtectedStringXmlTests
     [Test]
     public void Reads_large_multibyte_value_spanning_chunk_and_surrogate_boundaries()
     {
-        // 3000 emoji = 6000 UTF-16 code units, so the value crosses the 4 KiB
-        // ReadValueChunk buffer — and a surrogate pair can land on the seam.
-        // Correct output proves chunk concatenation reconstructs split pairs.
         var sb = new StringBuilder();
         for (int i = 0; i < 3000; i++) sb.Append("\U0001F511"); // 🔑
         string big = sb.ToString();

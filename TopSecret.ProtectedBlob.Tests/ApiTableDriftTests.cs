@@ -3,13 +3,6 @@ using TopSecret;
 
 namespace TopSecret.ProtectedBlobTests;
 
-/// <summary>
-/// Asserts the README's "### ProtectedBlob API surface" section stays in
-/// sync with the actual public surface of <see cref="ProtectedBlob"/> —
-/// the sibling of the core suite's <c>ApiTableDriftTests</c>, with the
-/// helpers duplicated because the repo deliberately has no shared
-/// test-utility project.
-/// </summary>
 [TestFixture]
 public class ApiTableDriftTests
 {
