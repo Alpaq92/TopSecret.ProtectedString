@@ -47,10 +47,18 @@ public sealed class ProtectedStringJsonConverter : JsonConverter<ProtectedString
         }
 
         // Unescaped output is never longer than the raw token, so sizing the
-        // scratch to the raw length is always sufficient for CopyString.
-        int maxBytes = reader.HasValueSequence
-            ? checked((int)reader.ValueSequence.Length)
-            : reader.ValueSpan.Length;
+        // scratch to the raw length is always sufficient for CopyString. The
+        // ceiling is enforced on the raw length too, BEFORE any allocation,
+        // so an oversized token never reaches the locked build buffer.
+        long rawLength = reader.HasValueSequence ? reader.ValueSequence.Length : reader.ValueSpan.Length;
+        if (rawLength > _maxUtf8Bytes)
+        {
+            throw new JsonException(
+                $"JSON string is {rawLength} UTF-8 bytes, above this converter's {_maxUtf8Bytes}-byte ceiling " +
+                $"for a {nameof(ProtectedString)}. If the value is legitimately that large, register " +
+                $"new {nameof(ProtectedStringJsonConverter)}(maxUtf8Bytes) with a higher ceiling.");
+        }
+        int maxBytes = (int)rawLength;
 
         if (maxBytes == 0)
         {
@@ -69,6 +77,38 @@ public sealed class ProtectedStringJsonConverter : JsonConverter<ProtectedString
             ArrayPool<byte>.Shared.Return(buffer);
         }
     }
+
+    /// <summary>
+    /// Default ceiling on the raw UTF-8 length of a JSON string this converter
+    /// will bind: 1 MiB. A secret larger than that is almost certainly a
+    /// mis-bound field (a certificate blob, a file body) and would otherwise
+    /// grow the locked, dump-excluded build buffer until the memory-locking
+    /// policy fires. Raise it through
+    /// <see cref="ProtectedStringJsonConverter(int)"/> for a legitimately
+    /// large value; it is not a hard limit of the type.
+    /// </summary>
+    public const int DefaultMaxUtf8Bytes = 1024 * 1024;
+
+    private readonly int _maxUtf8Bytes;
+
+    /// <summary>Converter with the <see cref="DefaultMaxUtf8Bytes"/> ceiling (the shape <c>[JsonConverter]</c> attributes need).</summary>
+    public ProtectedStringJsonConverter() : this(DefaultMaxUtf8Bytes) { }
+
+    /// <summary>
+    /// Converter that rejects any JSON string whose raw UTF-8 token is longer
+    /// than <paramref name="maxUtf8Bytes"/> with a <see cref="JsonException"/>
+    /// before allocating any scratch for it. Register it through
+    /// <see cref="JsonSerializerOptions.Converters"/>.
+    /// </summary>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="maxUtf8Bytes"/> is not positive.</exception>
+    public ProtectedStringJsonConverter(int maxUtf8Bytes)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maxUtf8Bytes);
+        _maxUtf8Bytes = maxUtf8Bytes;
+    }
+
+    /// <summary>The raw UTF-8 token length ceiling this instance enforces.</summary>
+    public int MaxUtf8Bytes => _maxUtf8Bytes;
 
     /// <inheritdoc/>
     /// <exception cref="NotSupportedException">Always — see the type remarks.</exception>

@@ -179,7 +179,7 @@ The general rule: **prefer streaming sinks** (`WriteUtf8To` / `CopyTo`) when the
 **Approaches in order of preference:**
 
 1. **Stream the bytes** (`WriteUtf8To`, `CopyTo`) into a `Stream` / `Span<char>` / `byte[]` API — no managed `string` materialises. Use this whenever the boundary allows it.
-2. **Use the obsolete `Access(Action<char[]>)` overload** when an external API genuinely requires a mutable `char[]`. The buffer is wiped on return; the `char[]` has the same heap caveats as a `string`, but you can pass it to APIs that mutate or re-encode in place. TPS002 catches captures that outlive the callback.
+2. **Use the obsolete `Access(Action<char[]>)` overload** when an external API genuinely requires a mutable `char[]`. The buffer is wiped on return; the `char[]` has the same heap caveats as a `string`, but you can pass it to APIs that mutate or re-encode in place. TPS002 catches captures, collection stores, and returns of the array that outlive the callback.
 3. **`new string(plain)` inside `Access`.** Last resort, reserved for when the BCL truly forces a `string`. Keep the materialization as close to the call as possible and suppress TPS001 with a justifying comment. Strictly weaker than every option above — see [How safe is `new string(plain)` inside `Access`?](#11-how-safe-is-new-stringplain-inside-access) in the FAQ for the full breakdown of what you give up.
 4. **Reconsider the protocol.** Mutual TLS, workload-identity tokens minted per-call, and federated credentials that never see a process-local secret are structurally stronger than any in-process secret protection — see the SO citation in [Inspiration](#inspiration).
 
@@ -559,7 +559,7 @@ This is a best-effort defence against **accidental** memory disclosure (heap dum
 - **Constant-time compare with deadlock-free lock ordering.** `CryptographicOperations.FixedTimeEquals` for plaintext equality and Argon2id verification. Concurrent `a.Equals(b)` / `b.Equals(a)` calls take the two instance locks in order of monotonic 64-bit ids (`Interlocked.Increment`) — deadlock-free, and unlike a `RuntimeHelpers.GetHashCode`-based ordering it has no 32-bit collision risk.
 - **`Dispose` + finalizer.** `Dispose` zeros ciphertext / nonce / tag and any in-flight build buffer; a finalizer covers the forget-to-dispose case.
 - **Logging-safe `ToString()`.** Returns `ProtectedString[length=N]`, never the plaintext.
-- **Build-time analyzer (TPS001–TPS003).** Flags plaintext copied or captured out of `Access` callbacks at compile time — into a `string`, a captured `char[]`, or a `ToArray()` copy. Defence-in-depth, not a substitute for the structural protection the `ReadOnlySpan` overload provides — triggers, suppression, and packaging in [Build-time analyzer](#build-time-analyzer).
+- **Build-time analyzer (TPS001–TPS003).** Flags plaintext copied or captured out of `Access` callbacks at compile time — into a `string` (including via `AsSpan`/`Slice`/range views, interpolation, `StringBuilder.Append`, and `Convert.ToBase64String`/`ToHexString`), a captured, stored, or returned `char[]`, or a `ToArray()` / `Encoding.GetBytes()` / range-slice copy. Defence-in-depth, not a substitute for the structural protection the `ReadOnlySpan` overload provides — triggers, suppression, and packaging in [Build-time analyzer](#build-time-analyzer).
 
 ### What this library does **not** do (and why)
 
@@ -683,9 +683,9 @@ Three diagnostics ship:
 
 | ID | Severity | Triggers on |
 | --- | --- | --- |
-| **TPS001** | Warning | Plaintext copied into a managed `string` inside an `Access` callback — `new string(plain)`, `plain.ToString()`, `string.Concat(..., plain, ...)`, `string.Create(..., plain, ...)`, or `Encoding.*.GetString(...)` over the plaintext. Once the bytes have been hashed into a `string`, the runtime may intern, deduplicate, or copy them across GC cycles in ways nothing in user code can erase. |
-| **TPS002** | Warning | The `Action<char[]>` overload's parameter is assigned to a captured local, field, or property — i.e., the `char[]` reference outlives the callback. The library zeroes the array on return, so the retained reference observes a buffer of zeros at best. The `ReadOnlySpan<char>` overload makes this structurally impossible. |
-| **TPS003** | Warning | `plain.ToArray()` inside an `Access` callback — an ordinary heap array copy the library never zeroes, whose reference escapes the callback freely. Operate on the provided buffer in place, or (if a copy is truly needed) zero it yourself in a `finally`. |
+| **TPS001** | Warning | Plaintext copied into a managed `string` inside an `Access` callback — `new string(plain)`, `plain.ToString()`, `string.Concat(..., plain, ...)`, `string.Create(..., plain, ...)`, `Encoding.*.GetString(...)` over the plaintext, string interpolation (`$"{plain}"`), `StringBuilder.Append(plain)`, or `Convert.ToBase64String` / `Convert.ToHexString` over it. Span and slice views of the plaintext (`plain.AsSpan(..)`, `plain.Slice(..)`, `plain[..n]`, `memory.Span`) feeding any of those sinks are flagged too. Once the bytes have been hashed into a `string`, the runtime may intern, deduplicate, or copy them across GC cycles in ways nothing in user code can erase. |
+| **TPS002** | Warning | The `Action<char[]>` / `Func<char[], T>` overload's parameter is assigned to a captured local, field, property, or array slot, stored in a collection (`list.Add(plain)`), or returned from the callback (`ps.Access(p => p)`) — i.e., the `char[]` reference outlives the callback. The library zeroes the array on return, so the retained reference observes a buffer of zeros at best. The `ReadOnlySpan<char>` overload makes this structurally impossible. |
+| **TPS003** | Warning | `plain.ToArray()`, an array-returning `Encoding.*.GetBytes(plain)`, or range-indexing a `char[]` parameter (`plain[..n]`) inside an `Access` callback — an ordinary heap array copy the library never zeroes, whose reference escapes the callback freely. Operate on the provided buffer in place (the `GetBytes(plain, destination)` overloads that write into a buffer you own are not flagged), or (if a copy is truly needed) zero it yourself in a `finally`. |
 
 The diagnostics are warnings, not errors — the C# language cannot prevent intentional copying, and there are legitimate cases (passing the plaintext to an external API that demands a `string`). If you need to suppress one deliberately, do it locally with a justification:
 
@@ -895,7 +895,7 @@ The `ci.yml` Linux leg additionally runs an AOT publish dry-run with warnings es
 | `TopSecret.ProtectedString` | Cross-platform main library (six TFM-specific assemblies under `lib/`) plus the `EscapingPlaintextAnalyzer` Roslyn analyzer at `analyzers/dotnet/cs/`. |
 | `TopSecret.ProtectedString.WindowsTpm` | Optional Windows TPM 2.0 wrapping subpackage. |
 | `TopSecret.ProtectedString.LinuxTpm` | Optional Linux TPM 2.0 wrapping subpackage. |
-| `TopSecret.ProtectedString.Configuration` | Optional `appsettings.json` binder — a single extension method (`BindProtectedStringOptions`) that wraps the `Enum.TryParse` / `TimeSpan.TryParse` boilerplate. Takes a single dependency on `Microsoft.Extensions.Configuration.Abstractions` so the main package stays dependency-minimal. |
+| `TopSecret.ProtectedString.Configuration` | Optional `appsettings.json` binder — two `BindProtectedStringOptions` extension overloads (root configuration or an explicit section) that wrap the enum / `TimeSpan` parsing boilerplate, stricter than bare `Enum.TryParse`: undefined enum names, integer strings and comma lists are rejected, `TimeSpan`s parse culture-invariantly, and a non-positive `ProcessKeyRotationInterval` is refused. Takes a single dependency on `Microsoft.Extensions.Configuration.Abstractions` so the main package stays dependency-minimal. |
 | `TopSecret.ProtectedString.Json` | Optional `System.Text.Json` converter (`ProtectedStringJsonConverter`) that binds a JSON string straight into a `ProtectedString` with no managed `string`. Deserialization-only; no extra dependency (`System.Text.Json` is in the shared framework). |
 | `TopSecret.ProtectedString.Xml` | Optional `XmlReader` helper (`ProtectedStringXml`) that reads an XML element's content straight into a `ProtectedString` with no managed `string`; hardened `FromXml` overloads parse XXE-safe. Deserialization-only; no extra dependency (`System.Xml` is in the shared framework). |
 | `TopSecret.ProtectedBlob` | Large-secret-blob sibling — chunked AES-GCM-256 envelope for multi-MB byte blobs, key wrapped under the shared process master (see [ProtectedBlob](#protectedblob-large-secret-blobs)). Bundles the same analyzer at `analyzers/dotnet/cs/`. |
@@ -975,9 +975,10 @@ configuration.BindProtectedStringOptions();
 By default the binder reads the `TopSecret:ProtectedString` section. Pass an explicit section if your layout differs:
 
 ```csharp
-ProtectedStringConfigurationExtensions.BindProtectedStringOptions(
-    configuration.GetSection("Crypto:Options"));
+configuration.GetSection("Crypto:Options").BindProtectedStringOptions();
 ```
+
+Both overloads are extension methods; the section one is the more specific, so the call above binds `Crypto:Options:*` directly rather than looking for `Crypto:Options:TopSecret:ProtectedString`.
 
 The companion package takes a single dependency (`Microsoft.Extensions.Configuration.Abstractions`) — the main `TopSecret.ProtectedString` package stays dependency-minimal so consumers who don't want `appsettings.json` integration pay nothing.
 
@@ -996,7 +997,7 @@ if (Enum.TryParse<KeyAtRestProtection>(
 //     ProcessKeyRotationPolicy, ProcessKeyRotationInterval.
 ```
 
-Both paths use skip-on-missing, **warn-on-malformed** semantics — a typo in `appsettings.json` keeps the property's current value and emits a one-shot [`Trace.TraceWarning`](#diagnostics) (companion package only; the manual block is silent unless you add the warning yourself). The companion package is exactly this code, packaged.
+Both paths use skip-on-missing, **warn-on-malformed** semantics — a typo in `appsettings.json` keeps the property's current value and emits a one-shot [`Trace.TraceWarning`](#diagnostics) (companion package only; the manual block is silent unless you add the warning yourself). The companion package is this code packaged, plus three guards the manual block lacks: enum values must be defined member names (`"42"` and `"HardwareBackedRequired,GuardedPage"` are warned-and-skipped instead of silently downgrading the tier), `TimeSpan`s parse with the invariant culture like the stock `ConfigurationBinder`, and a zero or negative `ProcessKeyRotationInterval` is warned-and-skipped because it would silently disable periodic rotation.
 
 ### Hot-reload semantics
 
@@ -1007,8 +1008,8 @@ Both paths use skip-on-missing, **warn-on-malformed** semantics — a typo in `a
 | `ProcessKeyRotationPolicy` | Next `ProtectedString` construction. Pre-existing instances aren't retroactively enrolled in the rotation registry — switching from `Disabled` to `OnDemand` only affects instances created after the re-bind. |
 | `MemoryLockingFailureBehavior` | Next memory-locking attempt that fails. The policy is consulted on every fault, so live processes pick up changes without a restart. |
 | `KeyAtRestProtection` | **Never on a live process** — read once at the lazy initialisation of the process protector. Call [`ProtectedString.RotateProcessKey()`](#process-key-rotation-opt-in) to swap protectors at runtime under the new option values. |
-| `UnwrappedKeyCacheTtl` | **Never on a live process** — same lazy-init point as `KeyAtRestProtection`. |
-| `ProcessKeyRotationInterval` | **Never on a live process** if the periodic timer has already started; takes effect on first `ProcessKeyRotationPolicy = Periodic` construction if not. |
+| `UnwrappedKeyCacheTtl` | **Never on a live process** — same lazy-init point as `KeyAtRestProtection`. Capped at `ProtectedStringOptions.MaxTimerDuration` (~49.7 days): above the timer ceiling the cache's wipe timer could not be armed and a zeroed buffer was left behind as the "cached" master. |
+| `ProcessKeyRotationInterval` | **Never on a live process** if the periodic timer has already started; takes effect on first `ProcessKeyRotationPolicy = Periodic` construction if not. The setter rejects negative values and anything above `ProtectedStringOptions.MaxTimerDuration` (~49.7 days, the `System.Threading.Timer` ceiling); the binder additionally refuses zero. |
 
 The library emits a one-shot [`Trace.TraceWarning`](#diagnostics) the first time a read-once option is mutated late — but only if a `TraceListener` is attached. **Practical guidance:** bind once in your composition root *before* any `ProtectedString` is constructed and treat the read-once keys as static configuration; reserve hot-reload for `ProcessKeyRotationPolicy` and `MemoryLockingFailureBehavior` if you want runtime adjustability.
 
@@ -1033,7 +1034,7 @@ var login = JsonSerializer.Deserialize<Login>(requestBody)!;
 // login.Password is a read-only ProtectedString; no plaintext string ever existed.
 ```
 
-Register it per-property with `[JsonConverter(typeof(ProtectedStringJsonConverter))]`, or add `new ProtectedStringJsonConverter()` to `JsonSerializerOptions.Converters` to cover every `ProtectedString` in a graph.
+Register it per-property with `[JsonConverter(typeof(ProtectedStringJsonConverter))]`, or add `new ProtectedStringJsonConverter()` to `JsonSerializerOptions.Converters` to cover every `ProtectedString` in a graph. The converter refuses a JSON string whose raw UTF-8 token exceeds `ProtectedStringJsonConverter.DefaultMaxUtf8Bytes` (1 MiB) with a `JsonException` *before* allocating any scratch — a mis-bound certificate body or file cannot grow the locked build buffer until the memory-locking policy fires. For a legitimately larger value register `new ProtectedStringJsonConverter(maxUtf8Bytes)` with a higher ceiling.
 
 **Deserialization-only by design.** The converter's `Write` throws `NotSupportedException`: serializing a `ProtectedString` back out would materialize the plaintext as a JSON string, exactly the exposure the library avoids (see [FAQ #3](#3-can-i-serialize-a-protectedstring)). Getting a secret *into* protection at the JSON boundary is the supported direction; getting one out is not.
 
@@ -1047,6 +1048,12 @@ Unlike `System.Text.Json`, `XmlSerializer` / `DataContractSerializer` have **no 
 // Convenience — parses XXE-safe (DtdProcessing.Prohibit, XmlResolver = null)
 // and reads the first <Password> element. Stream overload is a true no-string ingress.
 using var password = ProtectedStringXml.FromXml(configStream, "Password");
+```
+
+Every reader overload (`ReadElementContent`, both `FromXml`s) has a sibling taking an explicit `maxLength`; the defaults cap element content at `ProtectedStringXml.DefaultMaxLength` (1 Mi chars) and throw `XmlException` beyond it, wiping the partial value. The reader also fails closed on input that ends before the element's end tag instead of returning a truncated secret.
+
+```csharp
+using var token = ProtectedStringXml.FromXml(configStream, "ApiToken", maxLength: 8 * 1024);
 
 // Or drive your own reader (you own its XmlReaderSettings — make them XXE-safe):
 using var reader = XmlReader.Create(stream, mySettings);
@@ -1156,7 +1163,7 @@ This library was built with an audit-driven workflow assisted by an AI pair prog
 
 - **`Microsoft.CodeAnalysis.CSharp` in the analyzer project is pinned to a Roslyn version that requires a matching SDK floor.** An analyzer that references a *newer* Roslyn than the host compiler fails to load with `CS9057` ("analyzer references compiler version X newer than running version Y"), breaking every consumer's build. Current pin: **5.6.0**, bumped 2026-07-04 from the prior 5.3.0 pin. There is no cleanly documented public mapping from a Roslyn package version to its minimum host SDK, so the floor was set empirically — verified by a full solution rebuild with the analyzer self-applying via `ProjectReference` (the actual CS9057 failure path, not just the analyzer project's own build) — rather than assumed. The repo's `global.json` is set to `"version": "10.0.300"` with `rollForward: latestFeature`, so a contributor on an older SDK gets a clear "SDK 10.0.300 not found" error at restore time instead of a cryptic CS9057 mid-build. Consumers of the published NuGet must also be on SDK 10.0.300+ for the analyzer to load. Bumping the Roslyn pin further requires a corresponding SDK-floor bump (verified the same way) and a major-version release of this package (consumer-breaking change). **Enforced by `.github/dependabot.yml`**, which ignores `version-update:semver-minor` and `version-update:semver-major` bumps for that package — patch bumps inside the pinned major.minor still propose PRs.
 - **Analyzer release-tracking files** (`AnalyzerReleases.Shipped.md`, `AnalyzerReleases.Unshipped.md`) are promoted **by hand**, not by `release.yml` — there is no workflow step that moves them, and rules left in `Unshipped.md` stay valid for the build indefinitely, so nothing fails if a release ships without promoting. Promotion is a deliberate maintainer commit folded into the release PR before it merges; the runbook is in `AnalyzerReleases.Unshipped.md`'s header comment. Never hand-edit `Shipped.md` after a release lands; only add new rules to `Unshipped.md`.
-- **`github/codeql-action/init` and `github/codeql-action/analyze` must be pinned to the same SHA.** `init` writes a version-stamped config that `analyze` reads back, and a mismatch fails the job outright: *"Loaded a configuration file for version '4.37.4', but running version '4.36.3'"*. Dependabot treats the two sub-actions as separate dependencies and, left alone, opens one PR per half — each individually red, neither individually wrong. **Enforced by `.github/dependabot.yml`**, which groups `github/codeql-action*` into a single PR so the pair always moves together. Current pin: **v4.37.5** (both), set 2026-08-04 after that exact split happened.
+- **`github/codeql-action/init` and `github/codeql-action/analyze` must be pinned to the same SHA.** `init` writes a version-stamped config that `analyze` reads back, and a mismatch fails the job outright: *"Loaded a configuration file for version '4.37.4', but running version '4.36.3'"*. Dependabot treats the two sub-actions as separate dependencies and, left alone, opens one PR per half — each individually red, neither individually wrong. **Enforced by `.github/dependabot.yml`**, which groups `github/codeql-action*` into a single PR so the pair always moves together. The pin moves with the grouped Dependabot PRs (v4.39.1 as of 2026-11-04); the grouping was added 2026-08-04 after that exact split happened.
 - **`coverlet.msbuild` requires re-building** (no `--no-build`) because instrumentation runs at build time. CI's coverage step is ordered last on the Linux leg specifically so the instrumented binaries don't affect downstream test steps. If you reorder, keep it last.
 
 ## Inspiration
