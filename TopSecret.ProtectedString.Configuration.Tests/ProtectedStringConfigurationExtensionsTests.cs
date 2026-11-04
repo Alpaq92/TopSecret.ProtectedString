@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Globalization;
 using Microsoft.Extensions.Configuration;
 using TopSecret;
 
@@ -366,6 +367,399 @@ public class ProtectedStringConfigurationExtensionsTests
         finally
         {
             ProtectedStringOptions.MemoryLockingFailureBehavior = prior;
+        }
+    }
+
+    // ---- Undefined enum values ------------------------------------------
+    // Enum.TryParse accepts integer strings ("42") and comma-separated
+    // member lists ("A,B" → bitwise OR) for any enum, flags or not. None
+    // of the ProtectedStringOptions enums are [Flags], so such input
+    // yields a value no switch in the core library handles. The binder
+    // must reject it via Enum.IsDefined *before* the setter runs, so the
+    // warn-and-skip contract holds regardless of whether the setter
+    // itself validates.
+
+    [Test]
+    [NonParallelizable]
+    public void Integer_string_enum_value_warns_and_leaves_existing_value_unchanged()
+    {
+        var prior = ProtectedStringOptions.KeyAtRestProtection;
+        var listener = new CapturingTraceListener();
+        Trace.Listeners.Add(listener);
+        try
+        {
+            ProtectedStringOptions.KeyAtRestProtection = KeyAtRestProtection.Obscurity;
+
+            var cfg = BuildConfiguration(
+                ("TopSecret:ProtectedString:KeyAtRestProtection", "42"));
+            Assert.DoesNotThrow(() => cfg.BindProtectedStringOptions());
+
+            Assert.That(ProtectedStringOptions.KeyAtRestProtection,
+                Is.EqualTo(KeyAtRestProtection.Obscurity),
+                "an integer string must not bind to an undefined enum value");
+            Assert.That(
+                listener.Messages.Any(m =>
+                    m.Contains("KeyAtRestProtection") &&
+                    m.Contains("'42'") &&
+                    m.Contains("not a valid")),
+                Is.True,
+                "Trace.TraceWarning must fire for an undefined (integer) enum value. " +
+                "Captured messages: " + string.Join(" | ", listener.Messages));
+        }
+        finally
+        {
+            Trace.Listeners.Remove(listener);
+            listener.Dispose();
+            ProtectedStringOptions.KeyAtRestProtection = prior;
+        }
+    }
+
+    [Test]
+    [NonParallelizable]
+    public void Comma_separated_enum_list_warns_and_leaves_existing_value_unchanged()
+    {
+        var prior = ProtectedStringOptions.KeyAtRestProtection;
+        var listener = new CapturingTraceListener();
+        Trace.Listeners.Add(listener);
+        try
+        {
+            ProtectedStringOptions.KeyAtRestProtection = KeyAtRestProtection.Obscurity;
+
+            // Enum.TryParse would OR these together into an undefined value.
+            var cfg = BuildConfiguration(
+                ("TopSecret:ProtectedString:KeyAtRestProtection", "HardwareBackedRequired,GuardedPage"));
+            Assert.DoesNotThrow(() => cfg.BindProtectedStringOptions());
+
+            Assert.That(ProtectedStringOptions.KeyAtRestProtection,
+                Is.EqualTo(KeyAtRestProtection.Obscurity),
+                "a comma-separated member list must not bind to a bitwise-OR'd undefined value");
+            Assert.That(
+                listener.Messages.Any(m =>
+                    m.Contains("KeyAtRestProtection") &&
+                    m.Contains("HardwareBackedRequired,GuardedPage") &&
+                    m.Contains("not a valid")),
+                Is.True,
+                "Trace.TraceWarning must fire for a comma-separated enum list. " +
+                "Captured messages: " + string.Join(" | ", listener.Messages));
+        }
+        finally
+        {
+            Trace.Listeners.Remove(listener);
+            listener.Dispose();
+            ProtectedStringOptions.KeyAtRestProtection = prior;
+        }
+    }
+
+    [Test]
+    [NonParallelizable]
+    public void Wrong_casing_enum_value_still_binds_after_IsDefined_check()
+    {
+        // ignoreCase must survive the IsDefined tightening: TryParse
+        // normalises the casing to the declared member, so IsDefined
+        // sees a defined value.
+        var prior = ProtectedStringOptions.KeyAtRestProtection;
+        var listener = new CapturingTraceListener();
+        Trace.Listeners.Add(listener);
+        try
+        {
+            var cfg = BuildConfiguration(
+                ("TopSecret:ProtectedString:KeyAtRestProtection", "hardwarebackedPREFERRED"));
+            cfg.BindProtectedStringOptions();
+
+            Assert.That(ProtectedStringOptions.KeyAtRestProtection,
+                Is.EqualTo(KeyAtRestProtection.HardwareBackedPreferred));
+            Assert.That(listener.Messages, Is.Empty,
+                "a correctly named member in the wrong case is valid and must not warn; " +
+                "captured messages: " + string.Join(" | ", listener.Messages));
+        }
+        finally
+        {
+            Trace.Listeners.Remove(listener);
+            listener.Dispose();
+            ProtectedStringOptions.KeyAtRestProtection = prior;
+        }
+    }
+
+    [Test]
+    [NonParallelizable]
+    public void Valid_enum_member_name_still_binds_without_warning()
+    {
+        var prior = ProtectedStringOptions.ProcessKeyRotationPolicy;
+        var listener = new CapturingTraceListener();
+        Trace.Listeners.Add(listener);
+        try
+        {
+            ProtectedStringOptions.ProcessKeyRotationPolicy = ProcessKeyRotation.OnDemand;
+
+            var cfg = BuildConfiguration(
+                ("TopSecret:ProtectedString:ProcessKeyRotationPolicy", "Periodic"));
+            cfg.BindProtectedStringOptions();
+
+            Assert.That(ProtectedStringOptions.ProcessKeyRotationPolicy,
+                Is.EqualTo(ProcessKeyRotation.Periodic));
+            Assert.That(listener.Messages, Is.Empty,
+                "a valid member name must bind silently; " +
+                "captured messages: " + string.Join(" | ", listener.Messages));
+        }
+        finally
+        {
+            Trace.Listeners.Remove(listener);
+            listener.Dispose();
+            ProtectedStringOptions.ProcessKeyRotationPolicy = prior;
+        }
+    }
+
+    // ---- Section overload via extension syntax --------------------------
+    // IConfigurationSection : IConfiguration, so if only the
+    // IConfiguration overload were an extension method,
+    // cfg.GetSection("Crypto:Options").BindProtectedStringOptions()
+    // would resolve to it and read
+    // "Crypto:Options:TopSecret:ProtectedString" — the wrong path —
+    // silently binding nothing. Both overloads being extensions lets
+    // overload resolution pick the more specific section one.
+
+    [Test]
+    public void Section_overload_binds_when_called_via_extension_syntax()
+    {
+        var prior = ProtectedStringOptions.ProcessKeyRotationPolicy;
+        try
+        {
+            ProtectedStringOptions.ProcessKeyRotationPolicy = ProcessKeyRotation.OnDemand;
+
+            var cfg = BuildConfiguration(
+                ("Crypto:Options:ProcessKeyRotationPolicy", "Periodic"));
+            cfg.GetSection("Crypto:Options").BindProtectedStringOptions();
+
+            Assert.That(ProtectedStringOptions.ProcessKeyRotationPolicy,
+                Is.EqualTo(ProcessKeyRotation.Periodic),
+                "extension-syntax call on a section must bind from that section, " +
+                "not from <section>:TopSecret:ProtectedString");
+        }
+        finally
+        {
+            ProtectedStringOptions.ProcessKeyRotationPolicy = prior;
+        }
+    }
+
+    [Test]
+    public void Default_section_path_still_binds_via_extension_syntax_on_root()
+    {
+        // The IConfiguration overload must still be chosen for a
+        // configuration root (IConfigurationRoot is not a section).
+        var prior = ProtectedStringOptions.ProcessKeyRotationPolicy;
+        try
+        {
+            ProtectedStringOptions.ProcessKeyRotationPolicy = ProcessKeyRotation.OnDemand;
+
+            var cfg = BuildConfiguration(
+                ("TopSecret:ProtectedString:ProcessKeyRotationPolicy", "Periodic"));
+            cfg.BindProtectedStringOptions();
+
+            Assert.That(ProtectedStringOptions.ProcessKeyRotationPolicy,
+                Is.EqualTo(ProcessKeyRotation.Periodic));
+        }
+        finally
+        {
+            ProtectedStringOptions.ProcessKeyRotationPolicy = prior;
+        }
+    }
+
+    // ---- Culture-invariant TimeSpan parsing -----------------------------
+    // ConfigurationBinder parses with CultureInfo.InvariantCulture so an
+    // appsettings.json binds identically on every host. On .NET Core the
+    // culture-sensitive TimeSpan.TryParse(string, out) additionally
+    // accepts the *localised* form (fr-FR: "00:00:00,250"), which the
+    // invariant overload rejects. Both directions are pinned here.
+
+    [Test]
+    [NonParallelizable] // mutates CultureInfo.CurrentCulture and Trace.Listeners
+    public void TimeSpan_parses_invariantly_under_comma_decimal_culture()
+    {
+        var priorCulture = CultureInfo.CurrentCulture;
+        var priorUiCulture = CultureInfo.CurrentUICulture;
+        var prior = ProtectedStringOptions.UnwrappedKeyCacheTtl;
+        var listener = new CapturingTraceListener();
+        Trace.Listeners.Add(listener);
+        try
+        {
+            CultureInfo.CurrentCulture = CultureInfo.GetCultureInfo("fr-FR");
+            CultureInfo.CurrentUICulture = CultureInfo.GetCultureInfo("fr-FR");
+            Assume.That(CultureInfo.CurrentCulture.NumberFormat.NumberDecimalSeparator,
+                Is.EqualTo(","), "fr-FR must use ',' as the decimal separator for this test to be meaningful");
+
+            ProtectedStringOptions.UnwrappedKeyCacheTtl = TimeSpan.Zero;
+
+            // Invariant form binds regardless of the host culture.
+            var cfg = BuildConfiguration(
+                ("TopSecret:ProtectedString:UnwrappedKeyCacheTtl", "00:00:00.250"));
+            cfg.BindProtectedStringOptions();
+
+            Assert.That(ProtectedStringOptions.UnwrappedKeyCacheTtl,
+                Is.EqualTo(TimeSpan.FromMilliseconds(250)),
+                "'00:00:00.250' must parse under fr-FR");
+            Assert.That(listener.Messages, Is.Empty,
+                "invariant form must not warn; captured messages: " +
+                string.Join(" | ", listener.Messages));
+        }
+        finally
+        {
+            Trace.Listeners.Remove(listener);
+            listener.Dispose();
+            ProtectedStringOptions.UnwrappedKeyCacheTtl = prior;
+            CultureInfo.CurrentCulture = priorCulture;
+            CultureInfo.CurrentUICulture = priorUiCulture;
+        }
+    }
+
+    [Test]
+    [NonParallelizable]
+    public void TimeSpan_localised_form_is_rejected_even_under_matching_culture()
+    {
+        var priorCulture = CultureInfo.CurrentCulture;
+        var priorUiCulture = CultureInfo.CurrentUICulture;
+        var prior = ProtectedStringOptions.UnwrappedKeyCacheTtl;
+        var listener = new CapturingTraceListener();
+        Trace.Listeners.Add(listener);
+        try
+        {
+            CultureInfo.CurrentCulture = CultureInfo.GetCultureInfo("fr-FR");
+            CultureInfo.CurrentUICulture = CultureInfo.GetCultureInfo("fr-FR");
+
+            ProtectedStringOptions.UnwrappedKeyCacheTtl = TimeSpan.FromMilliseconds(100);
+
+            // Under fr-FR, culture-sensitive TryParse would accept this.
+            // The binder is invariant, so it must warn-and-skip instead —
+            // otherwise the same appsettings.json would bind differently
+            // depending on the host's locale.
+            var cfg = BuildConfiguration(
+                ("TopSecret:ProtectedString:UnwrappedKeyCacheTtl", "00:00:00,250"));
+            cfg.BindProtectedStringOptions();
+
+            Assert.That(ProtectedStringOptions.UnwrappedKeyCacheTtl,
+                Is.EqualTo(TimeSpan.FromMilliseconds(100)),
+                "culture-specific decimal separator must not be accepted");
+            Assert.That(
+                listener.Messages.Any(m =>
+                    m.Contains("UnwrappedKeyCacheTtl") &&
+                    m.Contains("00:00:00,250") &&
+                    m.Contains("not a valid TimeSpan")),
+                Is.True,
+                "Trace.TraceWarning must fire for the localised TimeSpan form. " +
+                "Captured messages: " + string.Join(" | ", listener.Messages));
+        }
+        finally
+        {
+            Trace.Listeners.Remove(listener);
+            listener.Dispose();
+            ProtectedStringOptions.UnwrappedKeyCacheTtl = prior;
+            CultureInfo.CurrentCulture = priorCulture;
+            CultureInfo.CurrentUICulture = priorUiCulture;
+        }
+    }
+
+    // ---- ProcessKeyRotationInterval must be positive --------------------
+    // The core periodic-rotation timer never starts when the interval is
+    // <= TimeSpan.Zero (EnsurePeriodicRotationTimer returns early with no
+    // diagnostic). Binding such a value from configuration would therefore
+    // silently disable rotation; the binder warns and skips instead.
+
+    [Test]
+    [NonParallelizable]
+    public void Zero_ProcessKeyRotationInterval_warns_and_leaves_existing_value_unchanged()
+    {
+        var prior = ProtectedStringOptions.ProcessKeyRotationInterval;
+        var listener = new CapturingTraceListener();
+        Trace.Listeners.Add(listener);
+        try
+        {
+            ProtectedStringOptions.ProcessKeyRotationInterval = TimeSpan.FromMinutes(5);
+
+            var cfg = BuildConfiguration(
+                ("TopSecret:ProtectedString:ProcessKeyRotationInterval", "00:00:00"));
+            Assert.DoesNotThrow(() => cfg.BindProtectedStringOptions());
+
+            Assert.That(ProtectedStringOptions.ProcessKeyRotationInterval,
+                Is.EqualTo(TimeSpan.FromMinutes(5)),
+                "a zero interval would silently disable periodic rotation and must be skipped");
+            Assert.That(
+                listener.Messages.Any(m =>
+                    m.Contains("ProcessKeyRotationInterval") &&
+                    m.Contains("'00:00:00'") &&
+                    m.Contains("not positive")),
+                Is.True,
+                "Trace.TraceWarning must fire for a zero rotation interval. " +
+                "Captured messages: " + string.Join(" | ", listener.Messages));
+        }
+        finally
+        {
+            Trace.Listeners.Remove(listener);
+            listener.Dispose();
+            ProtectedStringOptions.ProcessKeyRotationInterval = prior;
+        }
+    }
+
+    [Test]
+    [NonParallelizable]
+    public void Negative_ProcessKeyRotationInterval_warns_and_leaves_existing_value_unchanged()
+    {
+        var prior = ProtectedStringOptions.ProcessKeyRotationInterval;
+        var listener = new CapturingTraceListener();
+        Trace.Listeners.Add(listener);
+        try
+        {
+            ProtectedStringOptions.ProcessKeyRotationInterval = TimeSpan.FromMinutes(5);
+
+            var cfg = BuildConfiguration(
+                ("TopSecret:ProtectedString:ProcessKeyRotationInterval", "-00:30:00"));
+            Assert.DoesNotThrow(() => cfg.BindProtectedStringOptions());
+
+            Assert.That(ProtectedStringOptions.ProcessKeyRotationInterval,
+                Is.EqualTo(TimeSpan.FromMinutes(5)));
+            Assert.That(
+                listener.Messages.Any(m =>
+                    m.Contains("ProcessKeyRotationInterval") &&
+                    m.Contains("-00:30:00") &&
+                    m.Contains("not positive")),
+                Is.True,
+                "Trace.TraceWarning must fire for a negative rotation interval. " +
+                "Captured messages: " + string.Join(" | ", listener.Messages));
+        }
+        finally
+        {
+            Trace.Listeners.Remove(listener);
+            listener.Dispose();
+            ProtectedStringOptions.ProcessKeyRotationInterval = prior;
+        }
+    }
+
+    [Test]
+    [NonParallelizable]
+    public void Zero_UnwrappedKeyCacheTtl_still_binds_because_zero_means_off()
+    {
+        // Contrast with ProcessKeyRotationInterval: for the cache TTL,
+        // TimeSpan.Zero is the documented "cache disabled" value and must
+        // remain bindable without a warning.
+        var prior = ProtectedStringOptions.UnwrappedKeyCacheTtl;
+        var listener = new CapturingTraceListener();
+        Trace.Listeners.Add(listener);
+        try
+        {
+            ProtectedStringOptions.UnwrappedKeyCacheTtl = TimeSpan.FromMilliseconds(100);
+
+            var cfg = BuildConfiguration(
+                ("TopSecret:ProtectedString:UnwrappedKeyCacheTtl", "00:00:00"));
+            cfg.BindProtectedStringOptions();
+
+            Assert.That(ProtectedStringOptions.UnwrappedKeyCacheTtl, Is.EqualTo(TimeSpan.Zero));
+            Assert.That(listener.Messages, Is.Empty,
+                "zero TTL is a valid 'off' value and must not warn; captured messages: " +
+                string.Join(" | ", listener.Messages));
+        }
+        finally
+        {
+            Trace.Listeners.Remove(listener);
+            listener.Dispose();
+            ProtectedStringOptions.UnwrappedKeyCacheTtl = prior;
         }
     }
 }
