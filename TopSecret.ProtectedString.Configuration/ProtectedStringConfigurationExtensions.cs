@@ -11,10 +11,12 @@ public static class ProtectedStringConfigurationExtensions
     public static void BindProtectedStringOptions(this IConfiguration configuration)
     {
         ArgumentNullException.ThrowIfNull(configuration);
-        BindProtectedStringOptions(configuration.GetSection(DefaultSectionPath));
+        // A section passed here (cfg.GetSection(..).BindProtectedStringOptions())
+        // binds itself, not a TopSecret:ProtectedString child of it.
+        BindProtectedStringOptions(configuration as IConfigurationSection ?? configuration.GetSection(DefaultSectionPath));
     }
 
-    public static void BindProtectedStringOptions(this IConfigurationSection section)
+    public static void BindProtectedStringOptions(IConfigurationSection section)
     {
         ArgumentNullException.ThrowIfNull(section);
 
